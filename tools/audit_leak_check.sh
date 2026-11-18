@@ -33,6 +33,7 @@ grep -rEn -f "$PATTERNS" \
     --exclude=LICENSE \
     --exclude=audit_patterns.txt \
     --exclude=audit_leak_check.sh \
+    --exclude='*.o' --exclude='*.so' --exclude='*.dll' \
     . && STATUS=1
 
 # --- 2. copyright misattribution (code files only, LICENSE whitelisted) ----
@@ -52,6 +53,7 @@ grep -rnP '[^\x00-\x7F]' \
     --exclude=LICENSE \
     --exclude=audit_patterns.txt \
     --exclude=audit_leak_check.sh \
+    --exclude='*.o' --exclude='*.so' --exclude='*.dll' \
     . && STATUS=1
 
 if [ "$STATUS" = "0" ]; then

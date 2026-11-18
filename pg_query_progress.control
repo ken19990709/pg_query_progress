@@ -1,0 +1,5 @@
+# pg_query_progress extension
+comment = 'live per-query progress tracking for SELECT statements'
+default_version = '1.0'
+module_pathname = '$libdir/pg_query_progress'
+relocatable = false

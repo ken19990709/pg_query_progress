@@ -1,0 +1,255 @@
+# pg_query_progress
+
+Live, cost-weighted progress reporting for running `SELECT` statements in
+PostgreSQL -- a monitoring view any session can poll, plus an optional
+in-session progress bar rendered through the NOTICE stream of the session
+that runs the query.
+
+```
+[#######                 ] 28.4% 3.1s eta 7.9s nodes 2/5 tuples 12.8M
+```
+
+* [What and why](#what-and-why)
+* [What it looks like](#what-it-looks-like)
+* [Compatibility](#compatibility)
+* [Install](#install)
+* [Quick start](#quick-start)
+* [GUC reference](#guc-reference)
+* [How it works](#how-it-works)
+* [Known limitations](#known-limitations)
+* [Testing](#testing)
+* [Benchmark methodology](#benchmark-methodology)
+* [License](#license)
+
+## What and why
+
+PostgreSQL can tell you that a query is running (`pg_stat_activity`) and it
+can tell you how far along certain maintenance commands are
+(`pg_stat_progress_*` views) -- but for an ordinary `SELECT` it cannot tell
+you how much of the work is done.  For a count over a billion rows, or a
+wide scan feeding a sort, you are staring at a spinner.
+
+pg_query_progress fills that gap.  It wraps the executor's per-node tuple
+loop with a cheap counting hook, converts per-node row counts into a
+cost-weighted progress fraction using the planner's own cost model, and
+publishes the result to shared memory, where any session can read it:
+
+```sql
+SELECT pid, state, round(progress::numeric, 3) AS progress,
+       nodes_done, nodes_total, tuples_processed, parallel
+FROM pg_query_progress;
+```
+
+```
+  pid   |  state   | progress | nodes_done | nodes_total | tuples_processed | parallel
+--------+----------+----------+------------+-------------+------------------+----------
+ 424242 | running  |    0.612 |          3 |           5 |        612400012 | t
+```
+
+The same numbers can be rendered as a progress bar directly into the
+running session's NOTICE stream (psql prints them to stderr), so a plain
+`psql` shows a live bar without any second connection.
+
+## What it looks like
+
+A long-running count with the bar enabled (`SET pg_query_progress.bar = on`):
+
+```
+[                        ]  0.4% 0.5s eta --    nodes 0/5 tuples 1.2K
+[#                       ]  4.9% 1.0s eta 19.4s nodes 0/5 tuples 9.8M
+[####                    ] 17.8% 1.5s eta 6.9s nodes 1/5 tuples 35.1M
+...
+[######################  ] 95.1% 7.5s eta 0.4s nodes 3/5 tuples 190.7M
+[########################] 100.0% done 7.9s
+```
+
+Frames are throttled (default 500 ms) and queries younger than a gate
+(default: the same 500 ms) emit nothing at all, so catalog quick-looks and
+short statements stay silent.  From any other session, the view shows the
+same query with full detail (cost completed vs total, node counters,
+query id, timings).
+
+## Compatibility
+
+One source tree, one branch per PostgreSQL major:
+
+| PostgreSQL | Branch of this repository | Tag |
+|---|---|---|
+| 20 (devel) | `main` | `v4.0.0` |
+| 18.x       | `PG18` | `v4.0.0-pg18` |
+| 17.x       | `PG17` | `v4.0.0-pg17` |
+| 16.x       | `PG16` | `v4.0.0-pg16` |
+| 15.x       | `PG15` | `v4.0.0-pg15` |
+
+The `main` branch tracks the PostgreSQL 20 development line; every
+supported stable major has its own `PGxx` branch.  The extension sources
+are byte-identical across all branches -- every version difference is
+confined to `pgqp_compat.h` (plus one small version guard around a
+worker-side instrumentation pairing that only PostgreSQL 20 needs), which
+is what keeps cross-branch fixes conflict-free.  PostgreSQL 14 and earlier
+are not supported.  Linux is the developed-and-tested platform.
+
+PG15 reaches end of life in November 2027; the PG15 branch is maintained
+until then, but new deployments should prefer 16 or newer.
+
+## Install
+
+Standard PGXS build against the `pg_config` of your choice:
+
+```sh
+make PG_CONFIG=/path/to/pg_config
+make PG_CONFIG=/path/to/pg_config install
+```
+
+Then enable the preload and restart:
+
+```postgresql
+# postgresql.conf
+shared_preload_libraries = 'pg_query_progress'
+```
+
+After the restart, optionally create the extension (this installs the
+`pg_query_progress` view; it is not required if you install the view by
+the sed path shown in the SQL script header):
+
+```sql
+CREATE EXTENSION pg_query_progress;
+```
+
+Development note: against an uninstalled build tree you can skip
+`make install` and preload the freshly built library by absolute path:
+
+```
+shared_preload_libraries = '/path/to/repo/pg_query_progress.so'
+```
+
+The library must be loaded via `shared_preload_libraries` (it allocates
+shared memory at server start); a plain `LOAD` is detected and the view
+returns an empty set with a one-time warning.
+
+## Quick start
+
+In the session that runs long queries:
+
+```sql
+SET pg_query_progress.bar = on;
+SELECT count(*), sum(x + 1) FROM big_table;
+```
+
+In any other session (or a monitoring tool), poll the view:
+
+```sql
+SELECT pid, left(query, 40) AS query, state,
+       round(progress::numeric, 1) AS pct,
+       tuples_processed, age_ms
+FROM pg_query_progress
+WHERE state = 'running';
+```
+
+The query text is potentially sensitive, so the function and view are not
+granted to PUBLIC; grant them to monitoring roles explicitly:
+
+```sql
+GRANT SELECT ON pg_query_progress TO pg_monitor;
+```
+
+(`track` itself is superuser-settable; see below.)
+
+## GUC reference
+
+All GUCs live under the reserved `pg_query_progress.` prefix.
+
+| GUC | Level | Default | Meaning |
+|---|---|---|---|
+| `track` | superuser | `on` | master switch for tracking (data plane; bar knobs are independent) |
+| `max_query_len` | user | 1024 | query text truncation bound stored per slot (128..1024) |
+| `bar` | user | `off` | render in-session progress-bar frames via NOTICE |
+| `bar_ansi` | user | `off` | single-line ANSI redraw instead of appending frames |
+| `bar_interval_ms` | user | 500 | minimum spacing between frames (100..5000) |
+| `bar_min_query_ms` | user | 0 | minimum query age before any frame; 0 mirrors `bar_interval_ms` |
+
+## How it works
+
+At `ExecutorStart` the extension walks the planstate tree and wraps each
+node's `ExecProcNode` with a tick function that keeps the same row
+counting core's own instrumentation would keep (`InstrStartNode` /
+`InstrStopNode` semantics), pacing itself to check a clock once per 16
+node calls and republishing at most every 250 ms.
+
+Progress is cost-weighted: each node contributes
+
+```
+self_cost(node)   = total_cost(node) - sum(total_cost(children))
+node progress     = min(1, rows emitted / max(plan_rows, 1))
+global progress   = sum(self_cost * node progress) / sum(self_cost)
+```
+
+using the planner's own numbers, so the fraction is meaningful exactly
+when the plan is.  Blocking nodes (aggregates, sorts, set operations) are
+driven by their input's progress instead of their own blocked output;
+bitmap index subtrees fold into their parent; non-root Materialize nodes
+fold into their child.
+
+Parallel plans: workers run the same wrappers and publish per-node row
+counters into a shared worker table (seqlock-protected, keyed by leader id
++ query serial + parallel-context root); the leader merges matching
+counters into its walk and restores the planner's division by the
+parallel divisor D-hat.  On PostgreSQL 18 and earlier, the divisor
+respects the `parallel_leader_participation` GUC as of query start: with
+participation off, D-hat = W; with it on (the default), D-hat = W +
+max(0, 1 - 0.3*W).  Gather and Gather Merge honor the GUC the same way,
+and the formula covers both.  (PostgreSQL 19+ removed the GUC; there the
+leader always participates and the snapshot is constant true.)
+
+## Known limitations
+
+- `SELECT`-only: utility statements, DML and DDL are not tracked.
+- Progress is a cost-model estimate.  Row-count misestimates translate
+  directly into non-linear progress; the terminal 1.0 is forced on plan
+  drain, and progress is clamped monotonic.  Materialize buffering can
+  read ahead of true work; sort progress tracks input consumption, which
+  can lead time-to-completion estimates during the sort phase.
+- One tracked portal per session: starting a second query in a session
+  with an open cursor marks the cursor's row `terminated` (with its true
+  progress), not `failed`.
+- Shared memory use is about 3.2 MiB (fixed worker table) plus 1144
+  bytes per `max_connections`-derived backend slot.
+- If the server crashes, in-flight rows vanish with the shared memory
+  reset; worker counters left by killed workers are reclaimed on
+  restart, and a worker killed inside a write critical section degrades
+  to undercounting, never to hanging.
+- On PostgreSQL 18 and earlier, a SIGHUP-time global reload of
+  `parallel_leader_participation` that flips the GUC inside a running
+  query's rescan window can skew that one query's divisor by up to the
+  leader-share term; the reading stays clamped and monotonic.  This
+  mirrors core's own EXPLAIN accounting, which is not defended against
+  the same window either.
+- The bar renders through NOTICE: clients that suppress notices (or set
+  `client_min_messages` above notice) will not see frames; that path is a
+  server-side no-op.
+
+## Testing
+
+See [tests/README.md](tests/README.md).  The suite bootstraps throwaway
+instances and covers the bar gate, cancellation/error paths, cursors,
+SRFs, parallel visibility, the shared-memory layout, and (per branch) the
+GUC off arm and the worker instrumentation pairing.
+
+## Benchmark methodology
+
+Overhead was measured with paired-difference runs: the same query
+executed alternately with tracking off and on, after warm-up, taking
+median wall-clock differences, discarding outliers beyond the run's own
+spread.  The per-tuple hot path is one extra indirect call, two stores,
+and one clock read per 16 node calls; the module builds at `-O2`
+regardless of the surrounding build's flags to keep that cost stable on
+debug builds.  Publishes are lock-held only for a handful of scalar
+stores and are paced at >= 250 ms apart.  You can reproduce measurements
+on your own hardware with the workload tables from `tests/setup.sql`.
+
+## License
+
+PostgreSQL License -- see [LICENSE](LICENSE).  Contributions welcome:
+fork, branch, run `tests/smoke.sh` for the branch you target, and open a
+pull request against the matching `PGxx` branch (bug fixes usually apply
+cleanly to every branch from one commit, by design).
