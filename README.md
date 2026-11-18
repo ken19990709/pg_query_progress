@@ -228,6 +228,14 @@ leader always participates and the snapshot is constant true.)
   leader-share term; the reading stays clamped and monotonic.  This
   mirrors core's own EXPLAIN accounting, which is not defended against
   the same window either.
+- On PostgreSQL 18 and earlier with `parallel_leader_participation=off`:
+  mid-query updates are driven by the tuples that flow out of the Gather
+  in the leader process.  When the plan blocks inside the parallel
+  region (for example a partial aggregate under the Gather, which only
+  emits at the end), that flow stalls and the view/progress bar will
+  show few or no intermediate updates for such queries -- the data stays
+  correct and the terminal value is still exact.  Plans that stream
+  continuously (joins, scans, sorts under Gather Merge) update normally.
 - The bar renders through NOTICE: clients that suppress notices (or set
   `client_min_messages` above notice) will not see frames; that path is a
   server-side no-op.
@@ -236,8 +244,11 @@ leader always participates and the snapshot is constant true.)
 
 See [tests/README.md](tests/README.md).  The suite bootstraps throwaway
 instances and covers the bar gate, cancellation/error paths, cursors,
-SRFs, parallel visibility, the shared-memory layout, and (per branch) the
-GUC off arm and the worker instrumentation pairing.
+SRFs, parallel visibility, the shared-memory layout, co-existence with
+other preloaded extensions (pg_stat_statements), and (per branch) the
+GUC off arm and the worker instrumentation pairing.  There is no hosted
+CI yet; `tools/audit_leak_check.sh` and a multi-major build are the
+pre-release gates to run by hand.
 
 ## Benchmark methodology
 
