@@ -112,6 +112,9 @@ if [ ! -f "$PGXS" ]; then
 fi
 
 echo "bootstrap: building against $("$PG_CONFIG" --version) ($PG_CONFIG)"
+# force a fresh build: the working tree may hold artifacts from a
+# different PostgreSQL major
+make -C "$SRCROOT" "${MAKE_ARGS[@]}" -s clean > /dev/null 2>&1 || true
 make -C "$SRCROOT" "${MAKE_ARGS[@]}" -s > /dev/null || {
   echo "bootstrap: build failed" >&2
   exit 2
@@ -129,8 +132,11 @@ if [ -n "$TREE_ROOT" ]; then
   # initdb and the server locate everything (helpers, catalog files,
   # config templates) relative to their own binary location, so assemble
   # an installed-style layout of hard links into the build tree
+  # data-file layout differs per major: PostgreSQL 20 keeps the classic
+  # share/postgresql prefix, older majors use share directly -- serve both
+  # by placing the payload in share/ and self-linking share/postgresql
   SHIM="$STATE_DIR/bin"
-  SHARE="$STATE_DIR/share/postgresql"
+  SHARE="$STATE_DIR/share"
   mkdir -p "$SHIM" "$SHARE"
   for b in "$TREE_ROOT/src/backend/postgres" \
            "$TREE_ROOT/src/bin/initdb/initdb" \
@@ -154,8 +160,9 @@ if [ -n "$TREE_ROOT" ]; then
   # post-bootstrap (dict_snowball, plpgsql) or scenarios later (plpgsql,
   # auto_explain): every .so the tree built, plus the control/sql files
   # sitting next to every .control found
-  PKGLIB="$STATE_DIR/lib/postgresql"
+  PKGLIB="$STATE_DIR/lib"
   mkdir -p "$PKGLIB"
+  ln -sfn . "$PKGLIB/postgresql"
   find "$TREE_ROOT/src" "$TREE_ROOT/contrib" -name "*.so" -type f 2>/dev/null | while read -r src; do
     ln -f "$src" "$PKGLIB/$(basename "$src")" 2>/dev/null || cp "$src" "$PKGLIB/" 2>/dev/null
   done
@@ -183,7 +190,14 @@ if [ -n "$TREE_ROOT" ]; then
         cp "$src" "$SHARE/timezonesets/" 2>/dev/null
     done
   done
+  # client-side binaries may link the shared libpq of the tree
+  for src in "$TREE_ROOT"/src/interfaces/libpq/libpq.so*; do
+    [ -f "$src" ] && { ln -f "$src" "$SHIM/$(basename "$src")" 2>/dev/null || cp "$src" "$SHIM/"; }
+  done
   PG_BINDIR="$SHIM"
+  # the tree's binaries carry an rpath into the (absent) install prefix;
+  # make the shim directory itself the library search location
+  export LD_LIBRARY_PATH="$SHIM${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   echo "bootstrap: using shimmed install for source tree: $SHIM"
 fi
 
@@ -236,6 +250,7 @@ psql "${CONN[@]}" -X -q -v ON_ERROR_STOP=1 -v scale="$PGQP_SCALE" \
 }
 
 cat > "$ENV_FILE" <<EOF
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
 export PGHOST="$PGDATA"
 export PGPORT="$PORT"
 export PGUSER="postgres"
