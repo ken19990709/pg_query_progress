@@ -32,6 +32,52 @@ SRCROOT="$(cd "$TESTS_DIR/.." && pwd)"
 ENV_FILE="$TESTS_DIR/.pgqp_env.sh"
 STATE_DIR="$TESTS_DIR/.bootstrap"
 
+# ---------------------------------------------------------------------------
+# Teardown (--down).  Deliberately FIRST and self-contained: it must work
+# when called bare -- no environment sourced, no pg_config on PATH, no
+# LD_LIBRARY_PATH.  Everything needed (the shimmed bindir, the library
+# path, the data directory) is read back from the env file this script
+# wrote at bootstrap time.  The workdir is removed only after the
+# postmaster is verifiably gone; on failure the workdir is KEPT as
+# evidence and manual cleanup steps are printed.
+# ---------------------------------------------------------------------------
+stop_instance() {              # -> 0 iff no postmaster is left running
+  local pgdata="$STATE_DIR/pgdata" rc=1 bmpid
+  [ -f "$pgdata/postmaster.pid" ] || return 0
+  if [ -x "${PGQP_BINDIR:-}/pg_ctl" ]; then
+    "${PGQP_BINDIR}/pg_ctl" -D "$pgdata" stop -m immediate
+    rc=$?
+  else
+    echo "bootstrap: no usable pg_ctl (${PGQP_BINDIR:-unset})" >&2
+    rc=127
+  fi
+  # trust but verify: pg_ctl's word is not enough before we rm -rf
+  bmpid=$(head -1 "$pgdata/postmaster.pid" 2>/dev/null)
+  if [ -n "$bmpid" ] && kill -0 "$bmpid" 2>/dev/null; then
+    echo "bootstrap: postmaster $bmpid still alive after stop" >&2
+    return 1
+  fi
+  [ "$rc" = "0" ]
+}
+
+if [ "${1:-}" = "--down" ]; then
+  if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+  fi
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+  if stop_instance; then
+    rm -rf "$STATE_DIR" "$ENV_FILE"
+    echo "bootstrap: instance down, workdir removed"
+    exit 0
+  fi
+  echo "bootstrap: teardown FAILED -- workdir kept for inspection" >&2
+  echo "  data dir: $STATE_DIR/pgdata" >&2
+  echo "  manual stop: ${PGQP_BINDIR:-<shim bin>}/pg_ctl -D $STATE_DIR/pgdata stop -m immediate" >&2
+  echo "  then remove: rm -rf $STATE_DIR $ENV_FILE" >&2
+  exit 1
+fi
+
 PG_CONFIG="${PG_CONFIG:-pg_config}"
 PGQP_SCALE="${PGQP_SCALE:-0.1}"
 
@@ -80,14 +126,6 @@ if [ ! -f "$PG_BINDIR/postgres" ]; then
 fi
 PG_SO="$SRCROOT/pg_query_progress.so"
 
-if [ "${1:-}" = "--down" ]; then
-  if [ -f "$STATE_DIR/pgdata/postmaster.pid" ]; then
-    "$PG_BINDIR/pg_ctl" -D "$STATE_DIR/pgdata" stop -m immediate > /dev/null 2>&1
-  fi
-  rm -rf "$STATE_DIR" "$ENV_FILE"
-  echo "bootstrap: instance down, workdir removed"
-  exit 0
-fi
 
 # PGXS location: the pg_config-reported one for installed servers; for
 # an uninstalled source tree, the tree's own src/makefiles/pgxs.mk with
@@ -123,6 +161,16 @@ make -C "$SRCROOT" "${MAKE_ARGS[@]}" -s > /dev/null || {
   echo "bootstrap: $PG_SO not built" >&2
   exit 2
 }
+
+# refuse to bulldoze a still-running leftover instance: stopping it via
+# the self-contained teardown above is the only safe path
+if [ -f "$STATE_DIR/pgdata/postmaster.pid" ] &&
+   kill -0 "$(head -1 "$STATE_DIR/pgdata/postmaster.pid")" 2>/dev/null; then
+  if ! bash "$0" --down; then
+    echo "bootstrap: a previous instance is still running; aborting" >&2
+    exit 2
+  fi
+fi
 
 rm -rf "$STATE_DIR"
 mkdir -p "$STATE_DIR"
