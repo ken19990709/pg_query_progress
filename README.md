@@ -19,6 +19,7 @@ that runs the query.
 * [Known limitations](#known-limitations)
 * [Testing](#testing)
 * [Benchmark methodology](#benchmark-methodology)
+* [Contributing](#contributing)
 * [License](#license)
 
 ## What and why
@@ -258,9 +259,18 @@ debug builds.  Publishes are lock-held only for a handful of scalar
 stores and are paced at >= 250 ms apart.  You can reproduce measurements
 on your own hardware with the workload tables from `tests/setup.sql`.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build steps, the test
+workflow, and pull-request conventions.  Usage questions and general
+discussion go to
+[GitHub Discussions](https://github.com/ken19990709/pg_query_progress/discussions).
+Development happens on `main` (the PostgreSQL 20 development line) and
+is cherry-picked to the `PG18`/`PG17`/`PG16`/`PG15` branches with the
+core sources byte-identical everywhere, so bug fixes usually apply
+cleanly to every branch from one commit -- open your PR against the
+branch it belongs to, or against `main` if in doubt.
+
 ## License
 
-PostgreSQL License -- see [LICENSE](LICENSE).  Contributions welcome:
-fork, branch, run `tests/smoke.sh` for the branch you target, and open a
-pull request against the matching `PGxx` branch (bug fixes usually apply
-cleanly to every branch from one commit, by design).
+PostgreSQL License -- see [LICENSE](LICENSE).
