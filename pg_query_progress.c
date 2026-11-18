@@ -460,6 +460,17 @@ static void
 pgqp_shmem_request(void)
 {
 	/*
+	 * The postmaster calls only the end of the hook chain, so every hook
+	 * must forward to the one installed before it -- an extension loaded
+	 * earlier in shared_preload_libraries (e.g. pg_stat_statements)
+	 * would otherwise never have its shared memory requested and the
+	 * server would refuse to start.  (The startup hook below chains the
+	 * same way.)
+	 */
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	/*
 	 * One combined add-in request: the per-backend slot array (sized by
 	 * MaxBackends) plus the fixed-size worker counter table.  The legacy
 	 * protocol has no named-request concept; the two blocks are carved

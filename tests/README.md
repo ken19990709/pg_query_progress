@@ -31,7 +31,7 @@ Groups:
 | Group | Scenarios | What they pin down |
 |---|---|---|
 | S | s13, s21 | bar frame gate: first frame in [gate, gate+0.5s], short-query silence, one terminal frame for checkpoint-starved shapes |
-| R | s01, s02, s04, s05, s07, s12 | cancel/error -> failed + slot reuse, cursor CLOSE -> terminated, SRFs tracked, auto_explain coexistence, non-preload warning |
+| R | s01, s02, s04, s05, s07, s12, s28 | cancel/error -> failed + slot reuse, cursor CLOSE -> terminated, SRFs tracked, auto_explain coexistence, non-preload warning, pg_stat_statements shmem co-load (both orders) |
 | P | s22 (+ s26 on the main branch) | parallel visibility: monotonic progress, no mid-run collapse of completed_cost/tuples_processed, worker counters merged |
 | M | s18 | the two shared-memory blocks in pg_shmem_allocations with the exact expected byte counts |
 | L | s27 (stable branches only) | parallel_leader_participation=off: D-hat = W arithmetic and the worker-merge path end to end |
