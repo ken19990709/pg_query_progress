@@ -71,6 +71,10 @@ query id, timings).
 
 ## Compatibility
 
+**This is the PG18 branch** -- build it against PostgreSQL 18.x.  The
+sources are identical across all release branches of this project; see
+the table below for the branch matching your server version.
+
 One source tree, one branch per PostgreSQL major:
 
 | PostgreSQL | Branch of this repository | Tag |
