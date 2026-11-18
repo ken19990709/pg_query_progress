@@ -91,10 +91,11 @@ G_FRAMES=$(bar_count "$g_err")
 [ "$G_FRAMES" = "0" ]
 check "explicit gate 2000ms: 1.5s checkpoint-exhausted query -> 0 frames" $? "frames=$G_FRAMES"
 
-Q4="SELECT sum(c) FROM ("
-NREP="$(awk -v s="${PGQP_SCALE:-0.1}" 'BEGIN{r=30/(10*s); printf "%d", (r<4)?4:int(r+0.5)}')"
-for i in $(seq 1 "$NREP"); do Q4+=" SELECT count(*), sum(x + 1) AS c FROM big_table"; [ "$i" = "$NREP" ] || Q4+=" UNION ALL"; done
-Q4+=") t"
+# deterministic-duration flowing query for the explicit-gate arm: the
+# pg_sleep lateral is wall-clock-paced, so the arm does not depend on
+# machine speed (a scan-based arm can finish under the gate on fast or
+# warm machines, correctly producing zero frames)
+Q4="SELECT count(*) FROM slow_outer s, LATERAL (SELECT pg_sleep(0.03), s.k + 1 AS v) sub"
 g2_err="$WORKDIR/s21.gate2k.flow.err"; : > "$g2_err"
 psql -X -At -c "SET pg_query_progress.bar=on" \
                -c "SET pg_query_progress.bar_min_query_ms=2000" \
