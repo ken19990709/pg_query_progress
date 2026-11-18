@@ -28,8 +28,8 @@ check "sdx_tab built ($NROWS rows, index on k)" $?
 N=$(q "SELECT count(*) FROM sdx_tab")
 [ "$N" = "$NROWS" ]; check "sdx_tab row count == $NROWS" $? "n=$N"
 
-run_shape() {                # run_shape <label> <patterns,|> <sets> <query> [runs]
-  local label="$1" pats="$2" sets="$3" query="$4" runs="${5:-2}"
+run_shape() {                # run_shape <label> <patterns,|> <sets> <query> <expected> [runs]
+  local label="$1" pats="$2" sets="$3" query="$4" expect="$5" runs="${6:-2}"
   local ex rc=0 p pid i res_ok=0 pollf="$WORKDIR/s26.$label.poll"
   ex=$(psql -X -q -At -c "$sets" -c "EXPLAIN (COSTS OFF) $query" 2>&1)
   echo "$ex" > "$WORKDIR/s26.$label.explain.txt"
@@ -47,19 +47,19 @@ run_shape() {                # run_shape <label> <patterns,|> <sets> <query> [ru
     wait_until "$(timeout_scale 6)" "q \"SELECT 1 FROM pg_query_progress WHERE state='running' AND query LIKE '%s26${label}%' AND pid <> pg_backend_pid()\" | grep -q 1" && \
       pid=$(q "SELECT pid FROM pg_query_progress WHERE state='running' AND query LIKE '%s26${label}%' AND pid <> pg_backend_pid() LIMIT 1")
     if [ -n "$pid" ]; then
-      poll_progress "$pid" 0.1 "$(timeout_scale 120)" >> "$pollf"
+      poll_progress "$pid" 0.1 "$(timeout_scale 120)" "$pollf.tmp"
+      cat "$pollf.tmp" >> "$pollf" 2>/dev/null || true
     fi
     bg_close 9 "s26${label}${i}"
     GOT=$(tail -1 "$WORKDIR/s26.$label.$i.log" 2>/dev/null)
-    EXP=$(psql -X -At -c "SELECT (SELECT count(*) FROM sdx_tab WHERE k BETWEEN 100 AND 599) * 6")
-    [ "$GOT" = "$EXP" ] || { res_ok=1; echo "  info[$label run$i]: got=$GOT expect=$EXP"; }
+    [ "$GOT" = "$expect" ] || { res_ok=1; echo "  info[$label run$i]: got=$GOT expect=$expect"; }
   done
   check "$label x$runs: correct result, no crash, connection alive" $res_ok
   python3 - "$pollf" "$label" <<'PYEOF'
 import sys
 pollf, label = sys.argv[1], sys.argv[2]
 rows = [ln.rstrip("\n").split("\t") for ln in open(pollf) if ln.strip()]
-rows = [r for r in rows if len(r) >= 8]
+rows = [r for r in rows if len(r) >= 7]
 segments, cur = [], []
 for r in rows:
     cur.append(r)
@@ -83,7 +83,7 @@ sys.exit(0 if dec == 0 and terms
          and all(t[1] == "completed" and t[2] == "1" for t in terms) else 1)
 PYEOF
   check "$label view: monotonic, terminal completed/1.0" $?
-  PAR=$(grep -m1 "running" "$pollf" | awk -F'\t' '{print $8}')
+  PAR=$(grep -m1 "running" "$pollf" | awk -F'\t' '{print $7}')
   [ "$PAR" = "t" ]; check "$label view: parallel = t" $? "parallel=$PAR"
 }
 
@@ -91,18 +91,21 @@ PYEOF
 # cheaper than a full parallel seq scan, the cross join stretches runtime
 # past the publish cadence so mid-flight samples are observable
 K_HI="${PGQP_S26_KHI:-599}"
-Q_IOS="SELECT /* s26ios */ count(k) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN 100 AND $K_HI"
-Q_IS="SELECT /* s26is */ count(rid) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN 100 AND $K_HI"
-Q_BHS="SELECT /* s26bhs */ count(rid) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN 100 AND 349"
+K_LO=100
+Q_IOS="SELECT /* s26ios */ count(k) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN $K_LO AND $K_HI"
+Q_IS="SELECT /* s26is */ count(rid) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN $K_LO AND $K_HI"
+Q_BHS="SELECT /* s26bhs */ count(rid) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN $K_LO AND 349"
+EXP_FULL=$(q "SELECT count(*) FROM sdx_tab WHERE k BETWEEN $K_LO AND $K_HI")
+EXP_BHS=$(q "SELECT count(*) FROM sdx_tab WHERE k BETWEEN $K_LO AND 349")
 
 run_shape ios "Parallel Index Only Scan" \
-  "SET max_parallel_workers_per_gather=2; SET enable_bitmapscan=off; SET enable_seqscan=off" "$Q_IOS" 2
+  "SET max_parallel_workers_per_gather=2; SET enable_bitmapscan=off; SET enable_seqscan=off" "$Q_IOS" "$((EXP_FULL * 6))" 2
 
 run_shape is "Parallel Index Scan" \
-  "SET max_parallel_workers_per_gather=2; SET enable_bitmapscan=off; SET enable_indexonlyscan=off; SET enable_seqscan=off" "$Q_IS" 2
+  "SET max_parallel_workers_per_gather=2; SET enable_bitmapscan=off; SET enable_indexonlyscan=off; SET enable_seqscan=off" "$Q_IS" "$((EXP_FULL * 6))" 2
 
 run_shape bhs "Parallel Bitmap Heap Scan,Bitmap Index Scan" \
-  "SET max_parallel_workers_per_gather=2" "$Q_BHS" 2
+  "SET max_parallel_workers_per_gather=2" "$Q_BHS" "$((EXP_BHS * 6))" 2
 
 # ---- EXPLAIN ANALYZE double-count guard -------------------------------------
 ea_arm() {                   # ea_arm <label> <sets> <query>

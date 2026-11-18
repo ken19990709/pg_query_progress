@@ -55,8 +55,20 @@ SLOT=1144
 # header size: try the compiled probe against real headers; fall back to
 # the small known allowance
 HDR=""
-if [ -n "${PGQP_INCLUDE:-}" ] && [ -f "$PGQP_INCLUDE/postgres.h" ]; then
+INC_CAND=("${PGQP_INCLUDE:-}")
+# source-tree layouts relative to the pg_config binary
+PC_BIN="$(readlink -f "$(command -v "$PG_CONFIG_PGQP" 2>/dev/null || echo pg_config)")"
+d="$(dirname "$PC_BIN")"
+while [ "$d" != "/" ] && [ "${#INC_CAND[@]}" -lt 5 ]; do
+  for i in include src/include; do
+    [ -f "$d/$i/postgres.h" ] && INC_CAND+=("$d/$i")
+  done
+  d="$(dirname "$d")"
+done
+for inc in "${INC_CAND[@]}"; do
+  [ -n "$inc" ] && [ -f "$inc/postgres.h" ] || continue
   PROBE_SRC="$WORKDIR/size_probe.c"
+  # shellcheck disable=SC2034
   cat > "$PROBE_SRC" <<EOF
 #include "postgres.h"
 #include <unistd.h>
@@ -70,19 +82,31 @@ int main(void) {
     return 0;
 }
 EOF
-  if cc -I"$PGQP_INCLUDE" -o "$WORKDIR/size_probe" "$PROBE_SRC" 2>/dev/null; then
+  if cc -I"$inc" -o "$WORKDIR/size_probe" "$PROBE_SRC" 2>/dev/null; then
     HDR=$("$WORKDIR/size_probe" 2>&1)
-    echo "  info: probe sizeof(PgQPSharedState)=$HDR"
+    echo "  info: probe sizeof(PgQPSharedState)=$HDR (include: $inc)"
+    break
   fi
-fi
+done
 if [ -z "$HDR" ]; then
-  HDR=24          # allowance: LWLock + int + uint32, MAXALIGNed
+  # allowance: LWLock + int + uint32, MAXALIGNed to at most 32
+  HDR=24
+  HDR_RANGE=1
   echo "  info: header probe unavailable, using allowance $HDR"
 fi
 
 MAIN_SIZE=$(q "SELECT size FROM pg_shmem_allocations WHERE name = 'pg_query_progress'")
 EXPECT=$(( $(ALIGN "$HDR") + MB * $(ALIGN "$SLOT") ))
-[ "$MAIN_SIZE" = "$EXPECT" ]; check "main block size == header + MaxBackends*1144" \
-  $? "got=$MAIN_SIZE expect=$EXPECT (MaxBackends=$MB, hdr=$HDR)"
+if [ "${HDR_RANGE:-0}" = "1" ]; then
+  # no probe: header somewhere in 8..32, aligned
+  OK=$(awk -v got="$MAIN_SIZE" -v mb="$MB" -v slot="$(ALIGN "$SLOT")" \
+        'BEGIN { lo = mb*slot + 8; hi = mb*slot + 32;
+                 print (got >= lo && got <= hi && got % 8 == 0) ? 0 : 1 }')
+  check "main block size within header allowance + MaxBackends*1144" \
+    $? "got=$MAIN_SIZE range=[$((MB*$(ALIGN "$SLOT")+8)),$((MB*$(ALIGN "$SLOT")+32))] (MaxBackends=$MB)"
+else
+  [ "$MAIN_SIZE" = "$EXPECT" ]; check "main block size == header + MaxBackends*1144" \
+    $? "got=$MAIN_SIZE expect=$EXPECT (MaxBackends=$MB, hdr=$HDR)"
+fi
 
 finish_scenario

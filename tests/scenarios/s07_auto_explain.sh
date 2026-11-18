@@ -5,8 +5,12 @@
 # same query.  Skips when no auto_explain shared library can be located.
 source "$(dirname "$BASH_SOURCE")/../common.sh"
 
-# locate auto_explain: env override, then pg_config pkglibdir
+# locate auto_explain: env override, then the bootstrapped pkglibdir
+# (which for a source-tree run is the shimmed install), then pg_config
 AE_SO="${PGQP_AUTO_EXPLAIN_SO:-}"
+if [ -z "$AE_SO" ] && [ -n "${PGQP_PKGLIB:-}" ] && [ -f "$PGQP_PKGLIB/auto_explain.so" ]; then
+  AE_SO="$PGQP_PKGLIB/auto_explain.so"
+fi
 if [ -z "$AE_SO" ]; then
   cand="$("$PG_CONFIG_PGQP" --pkglibdir 2>/dev/null)/auto_explain.so"
   [ -f "$cand" ] && AE_SO="$cand"
@@ -22,7 +26,7 @@ run_variant() {                 # run_variant <order: qp_first|ae_first>
   local order="$1" pgdata="$WORKDIR/s7.$order" port
   port="$(free_port)"
   rm -rf "$pgdata"
-  initdb -D "$pgdata" --no-sync --auth=trust > /dev/null 2>&1
+  initdb -D "$pgdata" -U postgres --no-sync --auth=trust > /dev/null 2>&1
   if [ "$order" = "qp_first" ]; then
     PRELOAD="'$PGQP_SO, $AE_SO'"
   else

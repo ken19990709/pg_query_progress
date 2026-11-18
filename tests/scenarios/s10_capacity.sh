@@ -9,7 +9,7 @@ source "$(dirname "$BASH_SOURCE")/../common.sh"
 PGDATA10="$WORKDIR/s10cluster"
 PORT10="$(free_port)"
 rm -rf "$PGDATA10"
-initdb -D "$PGDATA10" --no-sync --auth=trust > /dev/null 2>&1
+initdb -D "$PGDATA10" -U postgres --no-sync --auth=trust > /dev/null 2>&1
 cat >> "$PGDATA10/postgresql.auto.conf" <<EOF
 shared_preload_libraries = '$PGQP_SO'
 max_connections = 5

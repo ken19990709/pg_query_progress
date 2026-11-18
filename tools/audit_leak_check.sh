@@ -4,11 +4,16 @@
 #
 # The project was developed against local PostgreSQL build trees and an
 # internal engineering record before being published.  This script greps
-# the whole tree for tokens that would betray that origin: absolute paths,
-# user names, internal port conventions, internal tool names, references to
-# the internal engineering documents, and copyright lines that misattribute
-# the work to the PostgreSQL project.  It is meant to run in CI and as a
-# pre-release check; any hit blocks the merge.
+# the tree for tokens that would betray that origin: absolute paths,
+# user names, internal port conventions, internal tool names, references
+# to the internal engineering documents, and copyright lines that
+# misattribute the work to the PostgreSQL project.  It is meant to run
+# in CI and as a pre-release check; any hit blocks the merge.
+#
+# Inside a git work tree only TRACKED files are scanned (transient test
+# instances and their shimmed installs live under ignored paths and
+# carry machine-local paths by design); outside one, the raw tree is
+# scanned with the known transient paths excluded.
 #
 # Usage:   tools/audit_leak_check.sh [tree-root]     (default: repo root)
 # Exit:    0 = clean, 1 = hits found
@@ -21,40 +26,34 @@ cd "$ROOT" || exit 1
 PATTERNS="$ROOT/tools/audit_patterns.txt"
 STATUS=0
 
-# --- 1. token audit (whole tree) -------------------------------------------
-# Exclusions:
-#   .git/            repository metadata
-#   LICENSE          whitelisted: the PostgreSQL License text names the
-#                    PostgreSQL Global Development Group by necessity
-#   audit_patterns.txt, audit_leak_check.sh
-#                    this audit itself necessarily spells out the patterns
-grep -rEn -f "$PATTERNS" \
-    --exclude-dir=.git \
-    --exclude=LICENSE \
-    --exclude=audit_patterns.txt \
-    --exclude=audit_leak_check.sh \
-    --exclude='*.o' --exclude='*.so' --exclude='*.dll' \
-    . && STATUS=1
+EXCLUDES="--exclude-dir=.git --exclude=LICENSE \
+--exclude=audit_patterns.txt --exclude=audit_leak_check.sh \
+--exclude='*.o' --exclude='*.so' --exclude='*.dll' \
+--exclude-dir=.bootstrap --exclude=.pgqp_env.sh"
 
-# --- 2. copyright misattribution (code files only, LICENSE whitelisted) ----
-grep -rEn "PostgreSQL Global Development Group" \
-    --include='*.c' --include='*.h' --include='*.sql' \
-    --include='*.sh' --include='*.control' --include='Makefile' \
-    --exclude-dir=.git \
-    --exclude=audit_leak_check.sh \
-    . && STATUS=1
-
-# --- 3. non-ASCII guard -----------------------------------------------------
-# The tree is deliberately plain ASCII (bar glyphs in code are emitted via
-# byte escapes; documentation uses ASCII art).  Any non-ASCII byte is most
-# likely a leftover from a non-English internal note.
-grep -rnP '[^\x00-\x7F]' \
-    --exclude-dir=.git \
-    --exclude=LICENSE \
-    --exclude=audit_patterns.txt \
-    --exclude=audit_leak_check.sh \
-    --exclude='*.o' --exclude='*.so' --exclude='*.dll' \
-    . && STATUS=1
+if [ -d "$ROOT/.git" ] && command -v git > /dev/null 2>&1; then
+    # tracked files only; grep -I skips binaries
+    mapfile -t FILES < <(git ls-files -- . ':(exclude)LICENSE' \
+        ':(exclude)tools/audit_patterns.txt' ':(exclude)tools/audit_leak_check.sh')
+    if [ "${#FILES[@]}" -gt 0 ]; then
+        grep -rEn -I -f "$PATTERNS" "${FILES[@]}" && STATUS=1
+        CODEFILES=$(printf "%s\n" "${FILES[@]}" | grep -E '\.(c|h|sql|sh|control)$|^Makefile$')
+        [ -n "$CODEFILES" ] && grep -En "PostgreSQL Global Development Group" $CODEFILES && STATUS=1
+        grep -rnP -I '[^\x00-\x7F]' "${FILES[@]}" && STATUS=1
+    fi
+else
+    # raw tree scan
+    # shellcheck disable=SC2086
+    grep -rEn -f "$PATTERNS" $EXCLUDES . && STATUS=1
+    # shellcheck disable=SC2086
+    grep -rEn "PostgreSQL Global Development Group" \
+        --include='*.c' --include='*.h' --include='*.sql' \
+        --include='*.sh' --include='*.control' --include='Makefile' \
+        --exclude-dir=.git --exclude=audit_leak_check.sh \
+        . && STATUS=1
+    # shellcheck disable=SC2086
+    grep -rnP '[^\x00-\x7F]' $EXCLUDES . && STATUS=1
+fi
 
 if [ "$STATUS" = "0" ]; then
     echo "audit: clean (0 hits)"

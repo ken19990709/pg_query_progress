@@ -92,7 +92,8 @@ G_FRAMES=$(bar_count "$g_err")
 check "explicit gate 2000ms: 1.5s checkpoint-exhausted query -> 0 frames" $? "frames=$G_FRAMES"
 
 Q4="SELECT sum(c) FROM ("
-for i in 1 2 3 4; do Q4+=" SELECT count(*), sum(x + 1) AS c FROM big_table"; [ "$i" = 4 ] || Q4+=" UNION ALL"; done
+NREP="$(awk -v s="${PGQP_SCALE:-0.1}" 'BEGIN{r=30/(10*s); printf "%d", (r<4)?4:int(r+0.5)}')"
+for i in $(seq 1 "$NREP"); do Q4+=" SELECT count(*), sum(x + 1) AS c FROM big_table"; [ "$i" = "$NREP" ] || Q4+=" UNION ALL"; done
 Q4+=") t"
 g2_err="$WORKDIR/s21.gate2k.flow.err"; : > "$g2_err"
 psql -X -At -c "SET pg_query_progress.bar=on" \

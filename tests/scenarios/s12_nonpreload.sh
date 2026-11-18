@@ -7,7 +7,7 @@ source "$(dirname "$BASH_SOURCE")/../common.sh"
 PGDATA12="$WORKDIR/s12cluster"
 PORT12="$(free_port)"
 rm -rf "$PGDATA12"
-initdb -D "$PGDATA12" --no-sync --auth=trust > /dev/null 2>&1
+initdb -D "$PGDATA12" -U postgres --no-sync --auth=trust > /dev/null 2>&1
 cat >> "$PGDATA12/postgresql.auto.conf" <<EOF
 unix_socket_directories = '$PGDATA12'
 EOF

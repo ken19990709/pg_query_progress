@@ -10,7 +10,7 @@
 source "$(dirname "$BASH_SOURCE")/../common.sh"
 
 Q="SELECT count(*), sum(x + 1) FROM big_table"
-REPEATS="${PGQP_S13_REPEATS:-8}"
+REPEATS="${PGQP_S13_REPEATS:-$(awk -v s="${PGQP_SCALE:-0.1}" 'BEGIN{r=24/(8*s); printf "%d", (r<2)?2:int(r+0.5)}')}"
 Q2="SELECT sum(c) FROM ("
 for i in $(seq 1 "$REPEATS"); do Q2+=" SELECT count(*), sum(x + 1) AS c FROM big_table"; [ "$i" = "$REPEATS" ] || Q2+=" UNION ALL"; done
 Q2+=") t"

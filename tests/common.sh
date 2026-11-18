@@ -47,7 +47,6 @@ fi
 # shellcheck disable=SC1090
 source "$PGQP_ENV"
 export PATH="$PGQP_BINDIR:$PATH"
-export PGOPTIONS="-c client_min_messages=warning"
 PGQP_TOLERANCE="${PGQP_TOLERANCE:-1}"
 
 PASS_COUNT=0
@@ -187,13 +186,13 @@ analyze_polls() {
 import sys
 out, label, mins, mindist = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 rows = [ln.rstrip("\n").split("\t") for ln in open(out) if ln.strip()]
-run = [r for r in rows if len(r) >= 8 and r[1] == "running"]
+run = [r for r in rows if len(r) >= 7 and r[1] == "running"]
 prog = [float(r[2]) for r in run]
 cc = [float(r[3]) for r in run]
 tp = [float(r[4]) for r in run]
 def dec(v): return sum(1 for i in range(1, len(v)) if v[i] < v[i-1] - 1e-9)
 def incs(v): return sum(1 for i in range(1, len(v)) if v[i] > v[i-1] + 1e-9)
-term = [r for r in rows if len(r) >= 8 and r[1] != "running"]
+term = [r for r in rows if len(r) >= 7 and r[1] != "running"]
 print("  info[%s]: samples=%d running=%d distinct_prog=%d dec(prog/cc/tp)=%d/%d/%d "
       "inc(cc/tp)=%d/%d term=%s" %
       (label, len(rows), len(run), len(set(prog)), dec(prog), dec(cc), dec(tp),
@@ -209,7 +208,7 @@ PYEOF
 # Frame shape (see pgqp_bar_frame): "[cells] 12.3% 1.5s eta 10.7s nodes 2/5 tuples 1.2K"
 # ---------------------------------------------------------------------------
 bar_count() {                   # bar_count <file> -> number of frames
-  grep -ac "NOTICE" "$1" 2>/dev/null || echo 0
+  grep -ac "NOTICE" "$1" 2>/dev/null || true
 }
 
 bar_percents() {                # bar_percents <file> -> one percent per line
@@ -253,7 +252,7 @@ PYEOF
 bar_lastdone() {                # bar_lastdone <file> -> 0 iff last frame is done
   python3 - "$1" <<'PYEOF'
 import sys
-last = ""
+last = b""
 for ln in open(sys.argv[1], "rb"):
     if b"NOTICE" in ln:
         last = ln

@@ -46,10 +46,42 @@ command -v "$PG_CONFIG" > /dev/null 2>&1 || {
 }
 
 PG_BINDIR="$("$PG_CONFIG" --bindir)"
+PC_BIN="$(readlink -f "$(command -v "$PG_CONFIG" 2>/dev/null || echo "$PG_CONFIG")")"
+if [ ! -x "$PG_BINDIR/initdb" ]; then
+  # in-tree pg_config reports paths relative to itself; walk up the
+  # standard source-tree layout (src/bin/pg_config -> src/bin -> src)
+  d="$(dirname "$PC_BIN")"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/initdb" ] && [ -x "$d/initdb" ]; then PG_BINDIR="$d"; break; fi
+    if [ -f "$d/initdb/initdb" ] && [ -x "$d/initdb/initdb" ]; then PG_BINDIR="$d/initdb"; break; fi
+    d="$(dirname "$d")"
+  done
+fi
+if [ ! -f "$PG_BINDIR/initdb" ] || [ ! -x "$PG_BINDIR/initdb" ]; then
+  echo "bootstrap: no initdb next to pg_config ($PG_BINDIR)" >&2
+  exit 2
+fi
+TREE_ROOT=""
+if [ ! -f "$PG_BINDIR/postgres" ]; then
+  # Uninstalled source tree: the binaries sit in separate build dirs
+  # (src/backend/postgres, src/bin/*/).  initdb and pg_ctl expect every
+  # helper in their own directory, so shim them together with symlinks
+  # (created after the workdir reset below).
+  d="$(dirname "$PC_BIN")"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/src/backend/postgres" ] && [ -f "$d/src/bin/initdb/initdb" ]; then break; fi
+    d="$(dirname "$d")"
+  done
+  if [ "$d" = "/" ]; then
+    echo "bootstrap: postgres binary not found for this pg_config" >&2
+    exit 2
+  fi
+  TREE_ROOT="$d"
+fi
 PG_SO="$SRCROOT/pg_query_progress.so"
 
 if [ "${1:-}" = "--down" ]; then
-  if [ -f "$STATE_DIR/postmaster.pid" ]; then
+  if [ -f "$STATE_DIR/pgdata/postmaster.pid" ]; then
     "$PG_BINDIR/pg_ctl" -D "$STATE_DIR/pgdata" stop -m immediate > /dev/null 2>&1
   fi
   rm -rf "$STATE_DIR" "$ENV_FILE"
@@ -71,13 +103,85 @@ rm -rf "$STATE_DIR"
 mkdir -p "$STATE_DIR"
 PGDATA="$STATE_DIR/pgdata"
 
+if [ -n "$TREE_ROOT" ]; then
+  # initdb and the server locate everything (helpers, catalog files,
+  # config templates) relative to their own binary location, so assemble
+  # an installed-style layout of hard links into the build tree
+  SHIM="$STATE_DIR/bin"
+  SHARE="$STATE_DIR/share/postgresql"
+  mkdir -p "$SHIM" "$SHARE"
+  for b in "$TREE_ROOT/src/backend/postgres" \
+           "$TREE_ROOT/src/bin/initdb/initdb" \
+           "$TREE_ROOT/src/bin/pg_ctl/pg_ctl" \
+           "$TREE_ROOT/src/bin/psql/psql"; do
+    [ -f "$b" ] || continue
+    ln -f "$b" "$SHIM/$(basename "$b")" 2>/dev/null || cp "$b" "$SHIM/"
+  done
+  # catalog payload + every config template the tree provides (the exact
+  # template set differs per major; taking them all is version-proof)
+  for f in postgres.bki snowball_create.sql information_schema.sql \
+           sql_features.txt system_constraints.sql errcodes.txt \
+           system_views.sql system_functions.sql; do
+    src="$(find "$TREE_ROOT/src" -name "$f" -type f 2>/dev/null | head -1)"
+    [ -n "$src" ] && { ln -f "$src" "$SHARE/$f" 2>/dev/null || cp "$src" "$SHARE/"; }
+  done
+  find "$TREE_ROOT/src" -name "*.sample" -type f 2>/dev/null | while read -r src; do
+    ln -f "$src" "$SHARE/$(basename "$src")" 2>/dev/null || cp "$src" "$SHARE/" 2>/dev/null
+  done
+  # shared libraries and extension metadata initdb may need during
+  # post-bootstrap (dict_snowball, plpgsql) or scenarios later (plpgsql,
+  # auto_explain): every .so the tree built, plus the control/sql files
+  # sitting next to every .control found
+  PKGLIB="$STATE_DIR/lib/postgresql"
+  mkdir -p "$PKGLIB"
+  find "$TREE_ROOT/src" "$TREE_ROOT/contrib" -name "*.so" -type f 2>/dev/null | while read -r src; do
+    ln -f "$src" "$PKGLIB/$(basename "$src")" 2>/dev/null || cp "$src" "$PKGLIB/" 2>/dev/null
+  done
+  EXTDIR="$SHARE/extension"
+  mkdir -p "$EXTDIR"
+  find "$TREE_ROOT/src" "$TREE_ROOT/contrib" -name "*.control" -type f 2>/dev/null |
+  while read -r ctl; do
+    d="$(dirname "$ctl")"
+    for src in "$d"/*.control "$d"/*.sql; do
+      [ -f "$src" ] && { ln -f "$src" "$EXTDIR/$(basename "$src")" 2>/dev/null || cp "$src" "$EXTDIR/"; }
+    done
+  done
+  # timezone data: system zoneinfo (what make install would copy) and the
+  # server's timezone-set definitions from the source tree
+  ln -sfn /usr/share/zoneinfo "$SHARE/timezone"
+  mkdir -p "$SHARE/timezonesets"
+  for d in "$TREE_ROOT/src/timezone" "$TREE_ROOT/src/timezone/tznames"; do
+    [ -d "$d" ] || continue
+    find "$d" -maxdepth 1 -type f \( -name "[A-Z]*" -o -name "*.sets" \) 2>/dev/null |
+    while read -r src; do
+      case "$(basename "$src")" in
+        Makefile|README*|*.c|*.h|*.o) continue ;;
+      esac
+      ln -f "$src" "$SHARE/timezonesets/$(basename "$src")" 2>/dev/null ||
+        cp "$src" "$SHARE/timezonesets/" 2>/dev/null
+    done
+  done
+  PG_BINDIR="$SHIM"
+  echo "bootstrap: using shimmed install for source tree: $SHIM"
+fi
+
+export PATH="$PG_BINDIR:$PATH"
+
+# if anything fails from here on, take the throwaway instance down again
+bootstrap_failed() {
+  if [ -f "$STATE_DIR/pgdata/postmaster.pid" ]; then
+    "$PG_BINDIR/pg_ctl" -D "$STATE_DIR/pgdata" stop -m immediate > /dev/null 2>&1
+  fi
+}
+trap bootstrap_failed EXIT
+
 PORT="$(python3 -c 'import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
 print(s.getsockname()[1])
 s.close()')"
 
-"$PG_BINDIR/initdb" -D "$PGDATA" --no-sync --auth=trust > "$STATE_DIR/initdb.log" 2>&1 || {
+"$PG_BINDIR/initdb" -D "$PGDATA" -U postgres --no-sync --auth=trust > "$STATE_DIR/initdb.log" 2>&1 || {
   echo "bootstrap: initdb failed (see $STATE_DIR/initdb.log)" >&2
   exit 2
 }
@@ -98,31 +202,33 @@ EOF
 CONN=(-h "$PGDATA" -p "$PORT" -U postgres -d postgres)
 
 sed "s|MODULE_PATHNAME|$PG_SO|g" "$SRCROOT/pg_query_progress--1.0.sql" \
-  | "${CONN[@]}" psql -X -q 2> "$STATE_DIR/install.log" || {
+  | psql "${CONN[@]}" -X -q 2> "$STATE_DIR/install.log" || {
   echo "bootstrap: view install failed" >&2
   exit 2
 }
 
-"${CONN[@]}" psql -X -q -v ON_ERROR_STOP=1 -v scale="$PGQP_SCALE" \
+psql "${CONN[@]}" -X -q -v ON_ERROR_STOP=1 -v scale="$PGQP_SCALE" \
   -f "$TESTS_DIR/setup.sql" > /dev/null 2>&1 || {
   echo "bootstrap: setup.sql failed" >&2
   exit 2
 }
 
 cat > "$ENV_FILE" <<EOF
-PGHOST="$PGDATA"
-PGPORT="$PORT"
-PGUSER="postgres"
-PGDATABASE="postgres"
-PGQP_SO="$PG_SO"
-PGQP_BINDIR="$PG_BINDIR"
-PG_CONFIG_PGQP="$PG_CONFIG"
-PGDATA="$PGDATA"
-PGQP_SRCROOT="$SRCROOT"
-PGQP_SCALE="$PGQP_SCALE"
-PGQP_INCLUDE="${PGQP_INCLUDE:-$("$PG_CONFIG" --includedir-server)}"
+export PGHOST="$PGDATA"
+export PGPORT="$PORT"
+export PGUSER="postgres"
+export PGDATABASE="postgres"
+export PGQP_SO="$PG_SO"
+export PGQP_BINDIR="$PG_BINDIR"
+export PG_CONFIG_PGQP="$PG_CONFIG"
+export PGDATA="$PGDATA"
+export PGQP_SRCROOT="$SRCROOT"
+export PGQP_SCALE="$PGQP_SCALE"
+export PGQP_INCLUDE="${PGQP_INCLUDE:-$("$PG_CONFIG" --includedir-server)}"
+export PGQP_PKGLIB="${PKGLIB:-$("$PG_CONFIG" --pkglibdir)}"
 EOF
 
+trap - EXIT
 echo "bootstrap: instance up (port $PORT, socket $PGDATA)"
 echo "bootstrap: env written to $ENV_FILE (export PGQP_ENV=$ENV_FILE)"
 echo "bootstrap: teardown with: $0 --down"

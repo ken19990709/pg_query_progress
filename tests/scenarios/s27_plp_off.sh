@@ -33,6 +33,9 @@ DEF=$(q "SELECT setting FROM pg_settings WHERE name='parallel_leader_participati
 SSCALE="${PGQP_SCALE:-0.1}"
 psql -X -q -v ON_ERROR_STOP=1 -v sscale="$SSCALE" -f "$TESTS_DIR/setup_star.sql" > /dev/null 2>&1
 check "star schema ready (sscale=$SSCALE)" $?
+# pin two planned workers regardless of table size / chosen access path
+q "ALTER TABLE dim_customers SET (parallel_workers = 2)" > /dev/null
+q "ANALYZE dim_customers" > /dev/null
 
 run_arm() {                    # run_arm <label> <shape-grep> <query>
   local label="$1" shape="$2" query="$3"
@@ -62,8 +65,8 @@ run_arm() {                    # run_arm <label> <shape-grep> <query>
 import sys
 pollf, label = sys.argv[1], sys.argv[2]
 rows = [ln.rstrip("\n").split("\t") for ln in open(pollf) if ln.strip()]
-run = [(int(r[0]), float(r[2]), float(r[4])) for r in rows if len(r) >= 8 and r[1] == "running"]
-term = [r for r in rows if len(r) >= 8 and r[1] != "running"]
+run = [(int(r[0]), float(r[2]), float(r[4])) for r in rows if len(r) >= 7 and r[1] == "running"]
+term = [r for r in rows if len(r) >= 7 and r[1] != "running"]
 prog = [p for _, p, _ in run]
 def dec(v): return sum(1 for i in range(1, len(v)) if v[i] < v[i-1] - 1e-9)
 def incs(v): return sum(1 for i in range(1, len(v)) if v[i] > v[i-1] + 1e-9)
@@ -93,7 +96,7 @@ PYEOF
 import sys
 pollf, label = sys.argv[1], sys.argv[2]
 rows = [ln.rstrip("\n").split("\t") for ln in open(pollf) if ln.strip()]
-tp = [float(r[4]) for r in rows if len(r) >= 8 and r[1] == "running"]
+tp = [float(r[4]) for r in rows if len(r) >= 7 and r[1] == "running"]
 grow = sum(1 for i in range(1, len(tp)) if tp[i] > tp[i-1] + 1e-9)
 print("  info[%s]: tuples growth steps=%d (leader contributes none with participation off)" % (label, grow))
 sys.exit(0 if grow >= 3 else 1)
