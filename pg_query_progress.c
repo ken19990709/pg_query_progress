@@ -208,7 +208,7 @@ static Size pgqp_memsize(void);
 
 static void pgqp_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
-							 uint64 count);
+							 uint64 count PGQP_EXECRUN_TAIL);
 static void pgqp_ExecutorFinish(QueryDesc *queryDesc);
 static void pgqp_ExecutorEnd(QueryDesc *queryDesc);
 
@@ -583,7 +583,7 @@ pgqp_should_track(QueryDesc *queryDesc, int eflags)
 		return false;
 	if (queryDesc->operation != CMD_SELECT)
 		return false;
-	if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_EXPLAIN_GENERIC))
+	if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | PGQP_EXPLAIN_GENERIC_FLAG))
 		return false;
 	if (queryDesc->estate == NULL || queryDesc->planstate == NULL)
 		return false;
@@ -1308,7 +1308,7 @@ pgqp_worker_register(QueryDesc *queryDesc, int eflags)
 		return;
 	if (queryDesc->operation != CMD_SELECT)
 		return;
-	if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_EXPLAIN_GENERIC))
+	if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | PGQP_EXPLAIN_GENERIC_FLAG))
 		return;
 	if (queryDesc->estate == NULL || queryDesc->planstate == NULL)
 		return;
@@ -2418,7 +2418,8 @@ pgqp_detach_entry(PgQPEntry *entry)
  * plus a forced publish when a run-to-completion call has drained the plan.
  */
 static void
-pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
+				 uint64 count PGQP_EXECRUN_TAIL)
 {
 	PgQPEntry  *entry = pgqp_entry;
 	bool		track = (entry != NULL && entry->queryDesc == queryDesc);
@@ -2436,9 +2437,10 @@ pgqp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 	PG_TRY();
 	{
 		if (prev_ExecutorRun)
-			prev_ExecutorRun(queryDesc, direction, count);
+			prev_ExecutorRun(queryDesc, direction, count PGQP_EXECRUN_PASS);
 		else
-			standard_ExecutorRun(queryDesc, direction, count);
+			standard_ExecutorRun(queryDesc, direction,
+								 count PGQP_EXECRUN_PASS);
 	}
 	PG_FINALLY();
 	{

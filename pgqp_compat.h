@@ -133,6 +133,44 @@ pgqp_compat_new_tranche(const char *name)
 
 /*
  * --------------------------------------------------------------------
+ * Assorted pre-16 lexical gaps
+ * --------------------------------------------------------------------
+ *
+ * static_assert: only PostgreSQL 20 has the bare keyword at file scope
+ * (its builds are C11-native); 18 and earlier wrap _Static_assert into
+ * StaticAssertDecl and friends.  EXPLAIN
+ * (GENERIC PLAN) and its EXEC_FLAG_EXPLAIN_GENERIC arrived in 16, so
+ * the 15 build masks the flag to zero.
+ */
+#if PG_VERSION_NUM < 200000
+#define static_assert _Static_assert
+#endif
+#if PG_VERSION_NUM < 160000
+#define PGQP_EXPLAIN_GENERIC_FLAG 0
+#else
+#define PGQP_EXPLAIN_GENERIC_FLAG EXEC_FLAG_EXPLAIN_GENERIC
+#endif
+
+/*
+ * --------------------------------------------------------------------
+ * ExecutorRun signature
+ * --------------------------------------------------------------------
+ *
+ * PostgreSQL 18 removed the execute_once parameter from ExecutorRun
+ * (and the hook type); 17 and earlier take it as a fourth argument and
+ * forward it.  PGQP_EXECRUN_TAIL appends the parameter to a definition
+ * or declaration, PGQP_EXECRUN_PASS appends the argument to a call.
+ */
+#if PG_VERSION_NUM >= 180000
+#define PGQP_EXECRUN_TAIL	/* no execute_once parameter */
+#define PGQP_EXECRUN_PASS	/* no execute_once argument */
+#else
+#define PGQP_EXECRUN_TAIL	, bool execute_once
+#define PGQP_EXECRUN_PASS	, execute_once
+#endif
+
+/*
+ * --------------------------------------------------------------------
  * Worker-side index scan instrumentation
  * --------------------------------------------------------------------
  *

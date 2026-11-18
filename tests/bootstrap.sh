@@ -89,8 +89,30 @@ if [ "${1:-}" = "--down" ]; then
   exit 0
 fi
 
+# PGXS location: the pg_config-reported one for installed servers; for
+# an uninstalled source tree, the tree's own src/makefiles/pgxs.mk with
+# the include dirs pointed at the tree's src/include (the reported
+# prefix does not exist there)
+PGXS="$("$PG_CONFIG" --pgxs)"
+MAKE_ARGS=(PG_CONFIG="$PG_CONFIG")
+if [ ! -f "$PGXS" ]; then
+  d="$(dirname "$PC_BIN")"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/src/makefiles/pgxs.mk" ]; then break; fi
+    d="$(dirname "$d")"
+  done
+  if [ "$d" = "/" ] || [ ! -f "$d/src/include/postgres.h" ]; then
+    echo "bootstrap: PGXS not found for this pg_config" >&2
+    exit 2
+  fi
+  MAKE_ARGS+=("PGXS=$d/src/makefiles/pgxs.mk"
+              "includedir=$d/src/include"
+              "includedir_internal=$d/src/include"
+              "includedir_server=$d/src/include")
+fi
+
 echo "bootstrap: building against $("$PG_CONFIG" --version) ($PG_CONFIG)"
-make -C "$SRCROOT" PG_CONFIG="$PG_CONFIG" -s > /dev/null || {
+make -C "$SRCROOT" "${MAKE_ARGS[@]}" -s > /dev/null || {
   echo "bootstrap: build failed" >&2
   exit 2
 }
