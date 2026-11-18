@@ -26,7 +26,7 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$TESTS_DIR/.."
 
 GROUP_S="s13_bar_basic.sh s21_silence.sh"
-GROUP_R="s01_cancel.sh s02_error.sh s04_cursor.sh s05_srf.sh s07_auto_explain.sh s12_nonpreload.sh"
+GROUP_R="s01_cancel.sh s02_error.sh s04_cursor.sh s05_srf.sh s07_auto_explain.sh s12_nonpreload.sh s28_pgss_coload.sh"
 GROUP_P="s22_parallel_visibility.sh"
 GROUP_M="s18_memory.sh"
 GROUP_L="s27_plp_off.sh"

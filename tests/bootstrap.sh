@@ -160,6 +160,9 @@ if [ -n "$TREE_ROOT" ]; then
   # post-bootstrap (dict_snowball, plpgsql) or scenarios later (plpgsql,
   # auto_explain): every .so the tree built, plus the control/sql files
   # sitting next to every .control found
+  # PostgreSQL 20's initdb looks for the payload under share/postgresql
+  # (the pre-18 layout); majors from the newer layout read share/ directly
+  ln -sfn . "$SHARE/postgresql"
   PKGLIB="$STATE_DIR/lib"
   mkdir -p "$PKGLIB"
   ln -sfn . "$PKGLIB/postgresql"
