@@ -39,7 +39,8 @@ q "ANALYZE dim_customers" > /dev/null
 
 run_arm() {                    # run_arm <label> <shape-grep> <query>
   local label="$1" shape="$2" query="$3"
-  local sets="SET parallel_leader_participation=off; SET max_parallel_workers_per_gather=2"
+  # cheap-parallel GUCs keep two workers planned at smoke-scale sizes
+  local sets="SET parallel_leader_participation=off; SET max_parallel_workers_per_gather=2; SET min_parallel_table_scan_size=0; SET parallel_setup_cost=1; SET parallel_tuple_cost=0.0000001"
 
   local ex
   ex=$(psql -X -q -At -c "$sets" -c "EXPLAIN (COSTS OFF) $query" 2>&1)
@@ -104,12 +105,20 @@ PYEOF
   check "$label: worker counters merged (tuples grow with leader idle)" $?
 }
 
-# Gather form: plain count over the star cross join
+# Gather form.  IMPORTANT: the aggregation must sit OUTSIDE the Gather.
+# With participation off the leader scans nothing locally, so the leader's
+# own publish cadence is driven by the tuples streaming out of the Gather;
+# an aggregate inside the parallel region would emit only at the end and
+# the mid-run view would legitimately freeze.
+# OFFSET 0 is an optimization fence: without it the planner would push the
+# count's partial aggregation below the Gather, and the Gather would emit
+# only a handful of rows at the very end
 run_arm s27g "Gather" \
-  "SELECT /* s27g */ count(*) FROM dim_dates d, dim_customers c, dim_stores WHERE d.cal_date = c.reg_date"
+  "SELECT /* s27g */ count(*) FROM (SELECT c.customer_id FROM dim_customers c, dim_dates d, dim_stores WHERE d.cal_date = c.reg_date OFFSET 0) t"
 
-# Gather Merge form: ORDER BY forces a parallel sort under Gather Merge
+# Gather Merge form: ORDER BY forces per-worker sorts merged by Gather
+# Merge, streaming rows to the leader continuously
 run_arm s27gm "Gather Merge" \
-  "SELECT /* s27gm */ count(x) FROM (SELECT c.customer_id AS x FROM dim_customers c, dim_dates d WHERE d.cal_date = c.reg_date ORDER BY c.customer_id) s"
+  "SELECT /* s27gm */ count(x) FROM (SELECT b.x FROM big_table b, generate_series(1, 40) g ORDER BY b.x) s"
 
 finish_scenario
