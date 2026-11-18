@@ -46,6 +46,11 @@ Knobs (environment):
 - `PGQP_AUTO_EXPLAIN_SO` -- path to auto_explain.so (s07 skips if absent)
 - `PGQP_INCLUDE` -- server include dir for the s18 layout probe
 
+Teardown is `tests/bootstrap.sh --down` -- it works when called bare
+(no environment needs to be sourced) and removes the workdir only after
+the postmaster has verifiably exited; if the stop fails, the workdir is
+kept and manual cleanup steps are printed.
+
 Scenario output goes to per-run temporary working directories; nothing is
 written into the repository (`tests/results/` is gitignored).
 
