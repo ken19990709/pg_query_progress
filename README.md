@@ -71,7 +71,7 @@ query id, timings).
 
 ## Compatibility
 
-**This is the PG18 branch** -- build it against PostgreSQL 18.x.  The
+**This is the PG15 branch** -- build it against PostgreSQL 15.x.  The
 sources are identical across all release branches of this project; see
 the table below for the branch matching your server version.
 
