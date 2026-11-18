@@ -1,0 +1,11 @@
+# Build products
+*.o
+*.so
+*.dll
+*.deps/
+*.syms
+
+# Local test artifacts (never part of the repository)
+tests/results/
+tests/.pgqp_env.sh
+tests/.bootstrap/

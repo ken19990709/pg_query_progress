@@ -1,0 +1,7 @@
+# Release tarballs (git archive) stay lean: test scenarios are for checkouts.
+tests/ export-ignore
+
+# Language hints for code viewers
+*.c   linguist-language=C
+*.h   linguist-language=C
+*.sh  linguist-language=Shell
