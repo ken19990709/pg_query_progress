@@ -49,10 +49,24 @@ psql -X -At -c "SET pg_query_progress.bar=on" \
     > /dev/null 2> "$flow_err"
 DUR_MS=$(( $(date +%s%3N) - T0 ))
 FRAMES=$(bar_count "$flow_err")
-echo "  info: flowing arm duration=${DUR_MS}ms frames=$FRAMES"
-MIN_FRAMES=$(( DUR_MS / 500 - 2 ))
+# frame-count denominator = the SERVER-side query lifetime (parsed from
+# the terminal frame's own elapsed field), not wall time -- psql startup
+# and SET round-trips would inflate a wall-based denominator
+FLOW_S=$(python3 - "$flow_err" <<'PYE'
+import re, sys
+last = None
+for ln in open(sys.argv[1], "rb"):
+    if b"NOTICE" in ln:
+        m = re.search(rb"([0-9.]+)s(?: |$)", ln)
+        if m:
+            last = float(m.group(1))
+print(int(last * 1000) if last is not None else 0)
+PYE
+)
+echo "  info: flowing arm wall=${DUR_MS}ms query=${FLOW_S}ms frames=$FRAMES"
+MIN_FRAMES=$(( FLOW_S / 500 - 2 ))
 [ "$FRAMES" -ge "$MIN_FRAMES" ] && [ "$FRAMES" -ge 2 ]
-check "flowing: frame count >= duration/0.5s - 2" $? "frames=$FRAMES min=$MIN_FRAMES"
+check "flowing: frame count >= duration/0.5s - 2" $? "frames=$FRAMES min=$MIN_FRAMES (query=${FLOW_S}ms)"
 
 FFE=$(bar_first_elapsed "$flow_err")
 # one guarded re-measure: heavy host load landing between gate and the

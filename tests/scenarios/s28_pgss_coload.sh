@@ -51,17 +51,29 @@ EOF
   sed "s|MODULE_PATHNAME|$PGQP_SO|g" "$PGQP_SRCROOT/pg_query_progress--1.0.sql" \
     | psql "${conn[@]}" -X -q 2> "$WORKDIR/s28.$order.install.log"
   psql "${conn[@]}" -X -q -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" > /dev/null 2>&1
+  psql "${conn[@]}" -X -q -v ON_ERROR_STOP=1 -v scale=0.02 \
+    -f "$TESTS_DIR/setup.sql" > /dev/null 2>&1
 
-  # pg_query_progress functional: tracked query reaches completed/1.0
-  psql "${conn[@]}" -X -q -At \
-    -c "SET max_parallel_workers_per_gather=0" \
-    -c "SELECT count(*), sum(x + 1) FROM big_table" > /dev/null 2>&1
-  P=$(psql "${conn[@]}" -X -At -c "SELECT round(progress::numeric,6) FROM pg_query_progress WHERE state='completed' ORDER BY last_update DESC LIMIT 1")
+  # pg_query_progress functional: the tracked query reaches completed/1.0
+  # while its session is still held open (the process-exit fallback clears
+  # the slot, so a one-shot psql would leave nothing to observe)
+  local fifo="$WORKDIR/s28.$order.fifo" qpid
+  rm -f "$fifo"; mkfifo "$fifo"
+  psql "${conn[@]}" -X -q -At -f "$fifo" > "$WORKDIR/s28.$order.q.log" 2>&1 &
+  qpid=$!
+  exec 7> "$fifo"
+  echo "SET max_parallel_workers_per_gather=0;" >&7
+  echo "SELECT count(*), sum(x + 1) FROM big_table;" >&7
+  wait_until "$(timeout_scale 15)" "psql ${conn[*]} -X -At -c \"SELECT 1 FROM pg_query_progress WHERE state='completed' AND query LIKE '%big_table%'\" | grep -q 1"
+  P=$(psql "${conn[@]}" -X -At -c "SELECT round(progress::numeric,6) FROM pg_query_progress WHERE state='completed' AND query LIKE '%big_table%' ORDER BY last_update DESC LIMIT 1")
   [ "$P" = "1.000000" ]; check "pg_query_progress view functional ($order)" $? "progress=${P:-none}"
+  exec 7>&-; wait "$qpid" 2>/dev/null
 
-  # pg_stat_statements functional: it observed the query
-  C=$(psql "${conn[@]}" -X -At -c "SELECT calls FROM pg_stat_statements WHERE query LIKE '%sum(x + 1)%' LIMIT 1")
-  [ "$C" -ge 1 ] 2>/dev/null; check "pg_stat_statements view functional ($order)" $? "calls=${C:-none}"
+  # pg_stat_statements functional: it observed the query (stats flush
+  # asynchronously; literals are normalized, so match on the table name)
+  wait_until "$(timeout_scale 10)" "psql ${conn[*]} -X -At -c \"SELECT 1 FROM pg_stat_statements WHERE query LIKE '%big_table%' AND calls >= 1\" | grep -q 1"
+  C=$(psql "${conn[@]}" -X -At -c "SELECT calls FROM pg_stat_statements WHERE query LIKE '%big_table%' ORDER BY calls DESC LIMIT 1")
+  check "pg_stat_statements view functional ($order)" $? "calls=${C:-none}"
 
   # both shared-memory blocks present alongside pgss's own
   B=$(psql "${conn[@]}" -X -At -c "SELECT count(*) FROM pg_shmem_allocations WHERE name IN ('pg_query_progress','pg_query_progress_workers')")
