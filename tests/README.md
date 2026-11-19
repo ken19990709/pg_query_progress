@@ -31,7 +31,7 @@ Groups:
 | Group | Scenarios | What they pin down |
 |---|---|---|
 | S | s13, s21 | bar frame gate: first frame in [gate, gate+0.5s], short-query silence, one terminal frame for checkpoint-starved shapes |
-| D | s29-s37 | DML progress: INSERT...VALUES (exact denominator), INSERT...SELECT over a table scan (plus the pinned planner fact that DML sources never grow a Gather), ON CONFLICT attempted-row semantics, UPDATE/DELETE forms incl. the zero-match tick-starvation completion, MERGE node accounting, partition routing + BEFORE-trigger skip/rewrite, cancel/raise/EXPLAIN ANALYZE stress, bar_ansi default bytes |
+| D | s29-s37 | DML progress: INSERT...VALUES (exact denominator), INSERT...SELECT over a table scan (plus the pinned planner fact that DML sources never grow a Gather), ON CONFLICT attempted-row semantics, UPDATE/DELETE forms incl. the zero-match tick-starvation completion, MERGE node accounting, partition routing + BEFORE-trigger skip/rewrite, cancel/raise/EXPLAIN ANALYZE/DO-block-DML stress, bar_ansi default bytes |
 | R | s01, s02, s04, s05, s07, s12, s28 | cancel/error -> failed + slot reuse, cursor CLOSE -> terminated, SRFs tracked, auto_explain coexistence, non-preload warning, pg_stat_statements shmem co-load (both orders) |
 | P | s22 (+ s26 on the main branch) | parallel visibility: monotonic progress, no mid-run collapse of completed_cost/tuples_processed, worker counters merged |
 | M | s18 | the two shared-memory blocks in pg_shmem_allocations with the exact expected byte counts |
