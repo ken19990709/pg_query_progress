@@ -84,9 +84,9 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 /* GUC-backed variables. */
 static bool pgqp_track = true;
 static int	pgqp_max_query_len = PGQP_TRUNAME;
-/* v2 in-session bar, all PGC_USERSET */
+/* v2 in-session bar, all PGC_USERSET; v5 flips the ANSI default to on */
 static bool pgqp_bar = false;
-static bool pgqp_bar_ansi = false;
+static bool pgqp_bar_ansi = true;
 static int	pgqp_bar_interval_ms = 500;
 /* v3 frame gate: 0 = mirror bar_interval_ms */
 static int	pgqp_bar_min_query_ms = PGQP_BAR_GATE_DEFAULT;
@@ -334,7 +334,7 @@ _PG_init(void)
 	 * analogous to client_min_messages -> PGC_USERSET; the tracking data
 	 * plane keeps v1's pg_query_progress.track (PGC_SUSET). */
 	DefineCustomBoolVariable("pg_query_progress.bar",
-								 "Render an in-session progress bar for tracked SELECTs via NOTICE frames.",
+								 "Render an in-session progress bar for tracked queries via NOTICE frames.",
 								 "Off by default; frames go to the client's NOTICE stream (psql: stderr).",
 								 &pgqp_bar,
 								 false,
@@ -344,11 +344,17 @@ _PG_init(void)
 								 NULL,
 								 NULL);
 
+	/*
+	 * v5: default on -- enabling the bar alone now yields the
+	 * single-line in-place redraw experience.  Redirected stderr keeps
+	 * the raw ESC/CR bytes; bar_ansi=off is the escape hatch back to
+	 * appending one frame per line.
+	 */
 	DefineCustomBoolVariable("pg_query_progress.bar_ansi",
-								 "Use ANSI single-line redraw escape codes in bar frames.",
-								 "Only for real terminals; pipes/redirects will retain raw escape bytes.",
+								 "Use ANSI single-line redraw for bar frames (default on).",
+								 "Frames redraw in place on terminals; turn off (bar_ansi=off) when stderr is redirected to a file or pipe, otherwise raw ESC/CR bytes are retained.",
 								 &pgqp_bar_ansi,
-								 false,
+								 true,
 								 PGC_USERSET,
 								 0,
 								 NULL,
