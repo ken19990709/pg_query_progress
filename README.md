@@ -1,9 +1,9 @@
 # pg_query_progress
 
-Live, cost-weighted progress reporting for running `SELECT` statements in
-PostgreSQL -- a monitoring view any session can poll, plus an optional
-in-session progress bar rendered through the NOTICE stream of the session
-that runs the query.
+Live, cost-weighted progress reporting for running `SELECT` and DML
+(`INSERT`/`UPDATE`/`DELETE`/`MERGE`) statements in PostgreSQL -- a
+monitoring view any session can poll, plus an optional in-session progress
+bar rendered through the NOTICE stream of the session that runs the query.
 
 ```
 [#######                 ] 28.4% 3.1s eta 7.9s nodes 2/5 tuples 12.8M
@@ -25,9 +25,10 @@ that runs the query.
 
 PostgreSQL can tell you that a query is running (`pg_stat_activity`) and it
 can tell you how far along certain maintenance commands are
-(`pg_stat_progress_*` views) -- but for an ordinary `SELECT` it cannot tell
-you how much of the work is done.  For a count over a billion rows, or a
-wide scan feeding a sort, you are staring at a spinner.
+(`pg_stat_progress_*` views) -- but for an ordinary `SELECT` or `UPDATE` it
+cannot tell you how much of the work is done.  For a count over a billion
+rows, a wide scan feeding a sort, or a bulk `INSERT ... SELECT` that will
+run for minutes, you are staring at a spinner.
 
 pg_query_progress fills that gap.  It wraps the executor's per-node tuple
 loop with a cheap counting hook, converts per-node row counts into a
@@ -65,9 +66,11 @@ A long-running count with the bar enabled (`SET pg_query_progress.bar = on`):
 
 Frames are throttled (default 500 ms) and queries younger than a gate
 (default: the same 500 ms) emit nothing at all, so catalog quick-looks and
-short statements stay silent.  From any other session, the view shows the
-same query with full detail (cost completed vs total, node counters,
-query id, timings).
+short statements stay silent.  By default frames redraw in place on
+terminals (single-line ANSI redraw, `bar_ansi = on`); see the GUC
+reference for the redirected-output caveat.  From any other session, the
+view shows the same query with full detail (cost completed vs total, node
+counters, query id, timings).
 
 ## Compatibility
 
@@ -79,11 +82,17 @@ One source tree, one branch per PostgreSQL major:
 
 | PostgreSQL | Branch of this repository | Tag |
 |---|---|---|
-| 20 (devel) | `main` | `v4.0.0` |
-| 18.x       | `PG18` | `v4.0.0-pg18` |
-| 17.x       | `PG17` | `v4.0.0-pg17` |
-| 16.x       | `PG16` | `v4.0.0-pg16` |
-| 15.x       | `PG15` | `v4.0.0-pg15` |
+| 20 (devel) | `main` | `v5.0.0` |
+| 18.x       | `PG18` | `v5.0.0-pg18` |
+| 17.x       | `PG17` | `v5.0.0-pg17` |
+| 16.x       | `PG16` | `v5.0.0-pg16` |
+| 15.x       | `PG15` | `v5.0.0-pg15` |
+
+Repository tags (`v5.0.0`, `v5.0.0-pgNN`) label source releases of the
+extension; the SQL/catalog version reported by `CREATE EXTENSION` stays
+`1.0` because the view, its columns and the function signature have not
+changed since the first release -- upgrading the library (and restarting)
+is the whole update, no `ALTER EXTENSION ... UPDATE` is ever needed.
 
 The `main` branch tracks the PostgreSQL 20 development line; every
 supported stable major has its own `PGxx` branch.  The extension sources
@@ -168,7 +177,7 @@ All GUCs live under the reserved `pg_query_progress.` prefix.
 | `track` | superuser | `on` | master switch for tracking (data plane; bar knobs are independent) |
 | `max_query_len` | user | 1024 | query text truncation bound stored per slot (128..1024) |
 | `bar` | user | `off` | render in-session progress-bar frames via NOTICE |
-| `bar_ansi` | user | `off` | single-line ANSI redraw instead of appending frames |
+| `bar_ansi` | user | `on` | single-line ANSI redraw instead of appending frames; turn off when redirecting stderr to a file or pipe |
 | `bar_interval_ms` | user | 500 | minimum spacing between frames (100..5000) |
 | `bar_min_query_ms` | user | 0 | minimum query age before any frame; 0 mirrors `bar_interval_ms` |
 
@@ -205,14 +214,69 @@ max(0, 1 - 0.3*W).  Gather and Gather Merge honor the GUC the same way,
 and the formula covers both.  (PostgreSQL 19+ removed the GUC; there the
 leader always participates and the snapshot is constant true.)
 
+DML statements (`INSERT`, `UPDATE`, `DELETE`, `MERGE`) run through the
+same machinery.  The `ModifyTable` node is a zero-weight passthrough: the
+planner prices it at exactly its source subtree's cost, so it enters
+neither the numerator nor the denominator and progress is driven by the
+source plan -- rows already consumed over the planner's row estimate.
+What that means per form:
+
+- `INSERT ... VALUES`: the denominator is exact (the planner counts the
+  literal rows, it does not estimate them).
+- `INSERT ... SELECT`, `UPDATE ... FROM`, `DELETE ... USING`, `MERGE`:
+  the denominator is the source plan's estimated output rows (matched
+  rows for `UPDATE`/`DELETE`, join output for `MERGE`, attempted rows
+  for `ON CONFLICT`).
+- Partition routing, `BEFORE` row triggers that rewrite or skip rows,
+  and `ON CONFLICT` arbitration all happen after the source row is
+  consumed, so they cannot disturb monotonicity; a skipped or
+  conflict-dropped row still advances progress (the work of examining it
+  was done).
+- DML sources are serial: the planner enables parallel mode only for
+  top-level `SELECT` statements, so a `Gather` never appears under a
+  `ModifyTable` node (parallel insert-style work happens only in
+  `CREATE TABLE AS`/materialized views, which are tracked as the
+  `SELECT`s they are).  The zero-weight passthrough nevertheless treats
+  a `Gather`-bearing source like any other subtree, should a future
+  major lift that planner restriction.
+
 ## Known limitations
 
-- `SELECT`-only: utility statements, DML and DDL are not tracked.
+- Statement coverage: top-level `SELECT` and DML
+  (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) are tracked.  Not tracked: DDL
+  and utility statements (they do not run through the executor hooks),
+  `COPY FROM` (it writes the table directly, bypassing the executor),
+  and DML nested inside SQL function or PL/pgSQL bodies (only top-level
+  statements are tracked).  The inner query of `CREATE TABLE AS SELECT`,
+  of materialized views and of `COPY (SELECT ...) TO` is tracked as the
+  `SELECT` it is; the diff-application statements inside
+  `REFRESH MATERIALIZED VIEW CONCURRENTLY` are tracked individually.
+- DML readouts in the view: without `RETURNING`, `plan_rows` and
+  `rows_returned` are both 0 -- the planner prices the `ModifyTable`
+  output at zero rows unless `RETURNING` is present, and the root node
+  emits nothing; progress itself is unaffected (it is driven by the
+  source subtree).  With `RETURNING`, `plan_rows` approximates the source
+  row estimate and `rows_returned` counts returned rows;
+  `ON CONFLICT DO NOTHING` can make `rows_returned` smaller than
+  `plan_rows`.
+- A zero-match `UPDATE`/`DELETE` that still has to scan a large table is
+  a legal completion (terminal `completed`/1.0), but it produces no
+  intermediate frames or view refreshes while it scans: a scan whose
+  filter rejects every row is drained inside a single node call, so the
+  16-tick publish clock never fires and the view stays at its zero
+  snapshot (the `last_update` column identifies the stale row) until the
+  terminal publish.
 - Progress is a cost-model estimate.  Row-count misestimates translate
   directly into non-linear progress; the terminal 1.0 is forced on plan
   drain, and progress is clamped monotonic.  Materialize buffering can
   read ahead of true work; sort progress tracks input consumption, which
-  can lead time-to-completion estimates during the sort phase.
+  can lead time-to-completion estimates during the sort phase.  For DML
+  the estimate is over row consumption only: the planner charges nothing
+  for the write work itself (heap writes, index maintenance, WAL,
+  trigger execution), so statement-level triggers, batched flushes and
+  `ON CONFLICT` arbiter probes -- none of which appear in the plan --
+  can skew the pace (usually progress runs ahead of wall time);
+  monotonicity and the terminal value are unaffected.
 - One tracked portal per session: starting a second query in a session
   with an open cursor marks the cursor's row `terminated` (with its true
   progress), not `failed`.
@@ -238,17 +302,26 @@ leader always participates and the snapshot is constant true.)
   continuously (joins, scans, sorts under Gather Merge) update normally.
 - The bar renders through NOTICE: clients that suppress notices (or set
   `client_min_messages` above notice) will not see frames; that path is a
-  server-side no-op.
+  server-side no-op.  With `bar_ansi` on (the default), frames redraw in
+  place using ANSI escapes (`ESC[2K`, `ESC[1A`, `CR`) and the first frame
+  of a query carries no cursor-up prefix; when stderr is redirected to a
+  file or pipe those raw escape bytes are retained and log viewers will
+  show stray bytes -- set `pg_query_progress.bar_ansi = off` to go back
+  to appending one frame per line.  Non-psql drivers simply receive the
+  escape bytes as part of the NOTICE text, which the wire protocol
+  carries without harm.
 
 ## Testing
 
 See [tests/README.md](tests/README.md).  The suite bootstraps throwaway
 instances and covers the bar gate, cancellation/error paths, cursors,
 SRFs, parallel visibility, the shared-memory layout, co-existence with
-other preloaded extensions (pg_stat_statements), and (per branch) the
-GUC off arm and the worker instrumentation pairing.  There is no hosted
-CI yet; `tools/audit_leak_check.sh` and a multi-major build are the
-pre-release gates to run by hand.
+other preloaded extensions (pg_stat_statements), DML progress across all
+statement forms (values inserts, parallel insert-select, `ON CONFLICT`,
+update/delete forms, `MERGE`, partition routing and triggers, stress
+paths), and (per branch) the GUC off arm and the worker instrumentation
+pairing.  There is no hosted CI yet; `tools/audit_leak_check.sh` and a
+multi-major build are the pre-release gates to run by hand.
 
 ## Benchmark methodology
 
