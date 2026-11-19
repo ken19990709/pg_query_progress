@@ -1,15 +1,20 @@
 # pg_query_progress
 
-Live, cost-weighted progress reporting for running `SELECT` and DML
-(`INSERT`/`UPDATE`/`DELETE`/`MERGE`) statements in PostgreSQL -- a
-monitoring view any session can poll, plus an optional in-session progress
-bar rendered through the NOTICE stream of the session that runs the query.
+Live, cost-weighted **progress bars and percent-done estimates for any
+PostgreSQL query** -- `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE` --
+while it runs: rendered **inside your own psql session** (NOTICE frames,
+no second window), and readable from any other session through a SQL
+view.  Works on PostgreSQL 15-18.
 
-```
-[#######                 ] 28.4% 3.1s eta 7.9s nodes 2/5 tuples 12.8M
-```
+[![CI](https://github.com/ken19990709/pg_query_progress/actions/workflows/ci.yml/badge.svg)](https://github.com/ken19990709/pg_query_progress/actions/workflows/ci.yml)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15--18-336791?logo=postgresql&logoColor=white)](#compatibility)
+[![License](https://img.shields.io/badge/License-PostgreSQL-336791)](LICENSE)
+
+![pg_query_progress live progress bar in psql](assets/demo.gif)
 
 * [What and why](#what-and-why)
+* [How does this compare?](#how-does-this-compare)
+* [Try it with Docker](#try-it-with-docker)
 * [What it looks like](#what-it-looks-like)
 * [Compatibility](#compatibility)
 * [Install](#install)
@@ -24,12 +29,11 @@ bar rendered through the NOTICE stream of the session that runs the query.
 
 ## What and why
 
-PostgreSQL can tell you that a query is running (`pg_stat_activity`) and it
-can tell you how far along certain maintenance commands are
-(`pg_stat_progress_*` views) -- but for an ordinary `SELECT` or `UPDATE` it
-cannot tell you how much of the work is done.  For a count over a billion
-rows, a wide scan feeding a sort, or a bulk `INSERT ... SELECT` that will
-run for minutes, you are staring at a spinner.
+For an ordinary `SELECT` or `UPDATE`, PostgreSQL cannot tell you how much
+of the work is done: a count over a billion rows, a wide scan feeding a
+sort, or a bulk `INSERT ... SELECT` that will run for minutes all look the
+same from the outside -- you are staring at a spinner until the rows come
+back.
 
 pg_query_progress fills that gap.  It wraps the executor's per-node tuple
 loop with a cheap counting hook, converts per-node row counts into a
@@ -51,6 +55,68 @@ FROM pg_query_progress;
 The same numbers can be rendered as a progress bar directly into the
 running session's NOTICE stream (psql prints them to stderr), so a plain
 `psql` shows a live bar without any second connection.
+
+## How does this compare?
+
+The built-in tools answer different questions:
+
+| Tool | When you see it | What you get | Statements covered |
+|---|---|---|---|
+| `pg_stat_activity` | during | state, wait event, query text -- no progress % | all |
+| `pg_stat_progress_vacuum` / `_analyze` / `_cluster` / `_create_index` / `_copy` / `_basebackup` | during | phase + counters, for those specific commands | only those commands |
+| `EXPLAIN (ANALYZE)` | after the query finishes | exact plan + actual timings | any |
+| `auto_explain` | after completion, in the server log | plan + timing of slow queries | any (logging) |
+| **pg_query_progress** | during | cost-weighted percent-done, in-session animated bar, cross-session view | top-level `SELECT` + `INSERT`/`UPDATE`/`DELETE`/`MERGE` |
+
+To keep the comparison honest:
+
+- Progress is an estimate from the planner's cost model (row counts
+  weighted by node costs), not an exact measurement; the terminal 100%
+  is forced when the plan drains.
+- The library must be loaded at server start via
+  `shared_preload_libraries` (it allocates shared memory then); a plain
+  `LOAD` is not enough.
+- Typical overhead stays under 1% on the paired-difference benchmark
+  (see [Benchmark methodology](#benchmark-methodology)).
+
+## Try it with Docker
+
+The fastest way to see the bar: a published image with PostgreSQL 18,
+the extension preloaded, and a demo schema built on first start.
+
+```sh
+docker run -d --name pgqp -e POSTGRES_PASSWORD=postgres -p 5433:5432 \
+    ghcr.io/ken19990709/pg_query_progress:latest
+```
+
+The first start runs `initdb` and builds the demo tables (a few million
+rows; give it ~20 s).  Then run the demo query -- it is paced with
+`pg_sleep` to take about 8 s on any hardware, so the bar has time to
+animate in place:
+
+```sh
+psql -h localhost -p 5433 -U postgres \
+    -c "SET pg_query_progress.bar = on;" \
+    -c "SELECT count(*) FROM pace s, LATERAL (SELECT pg_sleep(0.04), s.k + 1 AS v) sub;"
+```
+
+While it runs, watch the same query from a second session:
+
+```sh
+psql -h localhost -p 5433 -U postgres \
+    -c "SELECT pid, state, round(progress::numeric, 1) AS pct, tuples_processed FROM pg_query_progress WHERE state = 'running';"
+```
+
+Any query of your own works too -- for a plain scan-shaped one try
+`SELECT count(*) FILTER (WHERE x % 7 = 0) FROM big_table;`.
+
+The image is built from the `Dockerfile` in this repository and
+published by the `Docker` workflow on every release (and on demand from
+the Actions tab).  To build it yourself:
+
+```sh
+docker build -t pg_query_progress .
+```
 
 ## What it looks like
 
@@ -104,7 +170,8 @@ until then, but new deployments should prefer 16 or newer.
 
 ## Install
 
-Standard PGXS build against the `pg_config` of your choice:
+Building from source (the Docker image above just wraps these steps):
+a standard PGXS build against the `pg_config` of your choice.
 
 ```sh
 make PG_CONFIG=/path/to/pg_config
@@ -323,8 +390,10 @@ all statement forms (values inserts, insert-select over a table scan --
 including the pinned fact that DML sources stay serial, `ON CONFLICT`,
 update/delete forms, `MERGE`, partition routing and triggers, stress
 paths), and (per branch) the GUC off arm and the worker instrumentation
-pairing.  There is no hosted CI yet; `tools/audit_leak_check.sh` and a
-multi-major build are the pre-release gates to run by hand.
+pairing.  CI (GitHub Actions) builds PostgreSQL 15-18 from the PGDG apt
+repository and runs the bar-gate scenario group (`tests/smoke.sh S`) plus
+`tools/audit_leak_check.sh` on every push and pull request; the full
+matrix remains a by-hand gate before releases.
 
 ## Benchmark methodology
 
