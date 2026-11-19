@@ -4,8 +4,11 @@
 #   - every published release
 #   - manually: Actions tab -> Docker -> Run workflow
 #
-# Tags: latest + pg18.  Uses only the built-in GITHUB_TOKEN, scoped by
-# the job permissions below; no other secrets are involved.
+# Flow: build -> load -> docker-run functional verification -> push.
+# The verification step is the gate that proves the README's
+# `docker run` quickstart actually works before any user sees the image;
+# it must fail the job on any miss.  Tags: latest + pg18.  Uses only the
+# built-in GITHUB_TOKEN, scoped by the job permissions below.
 name: Docker
 
 on:
@@ -15,7 +18,7 @@ on:
 
 jobs:
   publish:
-    name: Build and push the trial image
+    name: Build, verify, push the trial image
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -44,7 +47,88 @@ jobs:
             type=raw,value=latest
             type=raw,value=pg18
 
-      - name: Build and push
+      # Pass 1: build and load into the local daemon for verification;
+      # the layer cache is exported so the pushing pass below rebuilds
+      # nothing.
+      - name: Build (load locally for verification)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Functional verification: boot the image exactly like a first-time
+      # user would and assert the quickstart end to end.  Any failure must
+      # fail the job -- this is the last gate before the push.
+      - name: Verify the image (docker run + assertions)
+        run: |
+          IMAGE="ghcr.io/$GITHUB_REPOSITORY:latest"
+          docker run -d --name pgqp-verify -e POSTGRES_PASSWORD=postgres "$IMAGE"
+
+          # Readiness: first boot runs initdb plus docker/initdb/10-init.sql
+          # (extension view, 3M-row big_table, 200-row pace) before the real
+          # server starts.  pg_isready alone is NOT a safe marker here --
+          # during the init phase the entrypoint runs a temporary
+          # socket-only server that already answers psql.  Poll instead over
+          # TCP (only the final server listens there) for the LAST object
+          # the init script creates: pace answering 200 means the whole
+          # script ran and the final server is up.  Hard ceiling: 120 s.
+          ready=0
+          for i in $(seq 1 60); do
+            n="$(docker exec -e PGPASSWORD=postgres pgqp-verify \
+                 psql -h 127.0.0.1 -X -At -U postgres -d postgres \
+                 -c 'SELECT count(*) FROM pace' 2>/dev/null || true)"
+            if [ "$n" = "200" ]; then ready=1; break; fi
+            sleep 2
+          done
+          if [ "$ready" != "1" ]; then
+            echo "verify: image not ready after 120 s; container log follows" >&2
+            docker logs pgqp-verify >&2 || true
+            exit 1
+          fi
+          echo "verify: init complete, server up"
+
+          # (1) the extension itself is installed
+          EXTV="$(docker exec -e PGPASSWORD=postgres pgqp-verify \
+              psql -h 127.0.0.1 -X -At -U postgres -d postgres \
+              -c "SELECT extversion FROM pg_extension WHERE extname='pg_query_progress'")"
+          [ -n "$EXTV" ] || { echo "verify: extension missing (extversion='$EXTV')" >&2; exit 1; }
+          echo "verify: extension installed (extversion $EXTV)"
+
+          # (2) the bar animates: run the paced demo query with the bar on
+          # (200 rows x 0.02 s ~ 4 s, past the 500 ms frame gate) and look
+          # for progress frames -- a percent followed by an eta or the
+          # terminal done marker -- on psql's stderr.
+          BAR_ERR="$(mktemp)"
+          docker exec -e PGPASSWORD=postgres pgqp-verify \
+              psql -h 127.0.0.1 -X -At -U postgres -d postgres \
+              -c "SET pg_query_progress.bar = on;" \
+              -c "SELECT count(*) FROM pace s, LATERAL (SELECT pg_sleep(0.02), s.k + 1 AS v) sub;" \
+              > /dev/null 2> "$BAR_ERR"
+          echo "--- psql stderr from the bar query (escapes shown as ^[) ---"
+          cat -v "$BAR_ERR" || true
+          grep -Eq '[0-9]+(\.[0-9]+)?% ([0-9.]+s )?(eta|done)' "$BAR_ERR" \
+              || { echo "verify: no progress frames on psql stderr" >&2; exit 1; }
+          echo "verify: progress bar frames observed"
+
+          # (3) the demo table is fully loaded
+          N="$(docker exec -e PGPASSWORD=postgres pgqp-verify \
+              psql -h 127.0.0.1 -X -At -U postgres -d postgres \
+              -c 'SELECT count(*) FROM big_table')"
+          [ "$N" = "3000000" ] \
+              || { echo "verify: big_table count=$N, expected 3000000" >&2; exit 1; }
+          echo "verify: big_table has 3000000 rows"
+
+      - name: Remove the verification container
+        if: always()
+        run: docker rm -f pgqp-verify || true
+
+      # Pass 2: publish; served from the pass-1 layer cache.
+      - name: Push to ghcr.io
         uses: docker/build-push-action@v6
         with:
           context: .
