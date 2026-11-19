@@ -11,9 +11,13 @@
 #  - arm E, DELETE across partitions: terminal 1.0, correct counts
 source "$(dirname "$BASH_SOURCE")/../common.sh"
 
-N=$(awk -v s="${PGQP_SCALE:-0.1}" 'BEGIN{n=int(200000*s/0.1); if(n<20000)n=20000; if(n>300000)n=300000; print n}')
+# Row count sized for the trigger arms' sampling-density assertions to
+# hold on BOTH -O0 debug and -O2 release kernels: per-row trigger cost
+# differs ~3-4x between the two, and at the former 200k-row default the
+# skip/rewrite arms completed within ~2 publishes on -O2 (distinct < 3).
+# Bigger N only stretches the arms; every assertion is behavioral.
+N=$(awk -v s="${PGQP_SCALE:-0.1}" 'BEGIN{n=int(600000*s/0.1); if(n<60000)n=60000; if(n>800000)n=800000; print n}')
 Q=$(( N / 4 ))
-TENTH=$(( N / 10 ))
 
 q "DROP TABLE IF EXISTS s35_p CASCADE" > /dev/null
 q "CREATE TABLE s35_p (k int, v int, pad text) PARTITION BY RANGE (k)" > /dev/null

@@ -89,12 +89,19 @@ PYEOF
 
 # range predicate + generate_series cross: the range keeps the index path
 # cheaper than a full parallel seq scan, the cross join stretches runtime
-# past the publish cadence so mid-flight samples are observable
+# past the publish cadence so mid-flight samples are observable.
+# The bitmap arm's range is the narrowest of the three, so it gets its
+# own, larger multiplier: with the shared x6 it finishes before the
+# first view poll on -O2 release kernels (leaving no running row to read
+# parallel=t from); x28 at the default table size matches the mid-flight
+# window the x6/4M-row combination was verified with.  More multiplier
+# only stretches the arm, every assertion is behavioral.
 K_HI="${PGQP_S26_KHI:-599}"
 K_LO=100
+BMULT="${PGQP_S26_BHSMULT:-28}"
 Q_IOS="SELECT /* s26ios */ count(k) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN $K_LO AND $K_HI"
 Q_IS="SELECT /* s26is */ count(rid) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN $K_LO AND $K_HI"
-Q_BHS="SELECT /* s26bhs */ count(rid) FROM sdx_tab c, generate_series(1,6) g WHERE c.k BETWEEN $K_LO AND 349"
+Q_BHS="SELECT /* s26bhs */ count(rid) FROM sdx_tab c, generate_series(1,$BMULT) g WHERE c.k BETWEEN $K_LO AND 349"
 EXP_FULL=$(q "SELECT count(*) FROM sdx_tab WHERE k BETWEEN $K_LO AND $K_HI")
 EXP_BHS=$(q "SELECT count(*) FROM sdx_tab WHERE k BETWEEN $K_LO AND 349")
 
@@ -105,7 +112,7 @@ run_shape is "Parallel Index Scan" \
   "SET max_parallel_workers_per_gather=2; SET enable_bitmapscan=off; SET enable_indexonlyscan=off; SET enable_seqscan=off" "$Q_IS" "$((EXP_FULL * 6))" 2
 
 run_shape bhs "Parallel Bitmap Heap Scan,Bitmap Index Scan" \
-  "SET max_parallel_workers_per_gather=2" "$Q_BHS" "$((EXP_BHS * 6))" 2
+  "SET max_parallel_workers_per_gather=2" "$Q_BHS" "$((EXP_BHS * BMULT))" 2
 
 # ---- EXPLAIN ANALYZE double-count guard -------------------------------------
 ea_arm() {                   # ea_arm <label> <sets> <query>
