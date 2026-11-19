@@ -7,6 +7,8 @@
 #    slot failed, transaction aborted, no residue, no crash
 #  - arm C, EXPLAIN ANALYZE INSERT: tracked to completed/1.0 while the
 #    EXPLAIN output itself stays intact (no bar/NOTICE pollution)
+#  - arm E, DML inside a DO block: tracked as its own slot row (utility-
+#    entered executor context, the documented CTAS/REFRESH family)
 #  - arm D, auto_explain coexistence (skipped when no auto_explain.so is
 #    found): ANALYZE-instrumented DML completes 1.0 and the log carries
 #    the plan
@@ -78,6 +80,26 @@ if [ $? -ne 0 ]; then check "arm C: EXPLAIN output free of bar bytes" 0; else ch
 VC=$(q "SELECT state, progress FROM pg_query_progress WHERE query LIKE '%s36c%' AND state='completed' ORDER BY last_update DESC LIMIT 1")
 [ "$VC" = "completed|1" ]; check "arm C: EXPLAIN ANALYZE INSERT tracked to completed/1.0" $? "row=$VC"
 bg_close 9 s36cfifo
+q "DELETE FROM s36_r" > /dev/null
+
+# ---- arm E: DML inside a DO block (documented tracked surface) ----------------
+# A DO block enters the executor from ProcessUtility with no outer
+# ExecutorRun in flight, so its inner statements pass the top-level
+# tracking filter -- same family as the CTAS/MATVIEW inner SELECT and
+# the REFRESH MATERIALIZED VIEW CONCURRENTLY diff DML.  (Runs before
+# the auto_explain arm because that arm may skip-exit the scenario.)
+LOGBE="$WORKDIR/s36.e.log"
+bg_open 9 s36efifo "$LOGBE"
+sendq 9 'DO $$ BEGIN INSERT /* s36do */ INTO s36_r SELECT g FROM generate_series(1, 5000) g; END $$'
+wait_until "$(timeout_scale 10)" "q \"SELECT 1 FROM pg_query_progress WHERE query LIKE '%s36do%' AND state='completed'\" | grep -q 1"
+VE=$(q "SELECT state, progress, tuples_processed FROM pg_query_progress WHERE query LIKE '%s36do%' AND state='completed' ORDER BY last_update DESC LIMIT 1")
+echo "  info[armE]: $VE"
+echo "$VE" | grep -qE "^completed\|1\|[0-9]+$"; check "arm E: DO-block INSERT tracked as its own row" $? "row=$VE"
+TE=$(echo "$VE" | cut -d'|' -f3)
+[ "$TE" -ge 5000 ]; check "arm E: inner DML counters flow" $? "tuples=$TE"
+NE=$(q "SELECT count(*) FROM s36_r")
+[ "$NE" = "5000" ]; check "arm E: DO-block rows landed" $? "rows=$NE"
+bg_close 9 s36efifo
 q "DELETE FROM s36_r" > /dev/null
 
 # ---- arm D: auto_explain coexistence ------------------------------------------
