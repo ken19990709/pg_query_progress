@@ -417,9 +417,13 @@ class Glyphs:
             bbox = self._font.getbbox(ch)
             if bbox and bbox[2] > bbox[0]:
                 w = bbox[2] - bbox[0]
-                h = bbox[3] - bbox[1]
                 x = (self.cw - w) // 2 - bbox[0]
-                y = (self.chh - h) // 2 - bbox[1]
+                # Baseline alignment: every glyph is drawn from the
+                # row's line origin (y=0 = ascender top with the
+                # default "la" anchor), never centered by its own
+                # bbox -- otherwise "." floats to mid-line and g/p/y
+                # lose their descenders relative to the row.
+                y = 0
                 ImageDraw.Draw(img).text((x, y), ch, font=self._font,
                                          fill=color)
             self.cache[key] = img
@@ -557,7 +561,7 @@ def main():
                     help="seconds per typed character")
     ap.add_argument("--tail", type=float, default=1.4,
                     help="linger on the final frame, seconds")
-    ap.add_argument("--font-size", type=int, default=17,
+    ap.add_argument("--font-size", type=int, default=18,
                     help="monospace font size in px")
     ap.add_argument("--font", default=None, help="monospace font file")
     ap.add_argument("--palette-colors", type=int, default=64,
