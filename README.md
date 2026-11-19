@@ -76,8 +76,9 @@ To keep the comparison honest:
 - The library must be loaded at server start via
   `shared_preload_libraries` (it allocates shared memory then); a plain
   `LOAD` is not enough.
-- Typical overhead stays under 1% on the paired-difference benchmark
-  (see [Benchmark methodology](#benchmark-methodology)).
+- Typical measured overhead is sub-second per minute of query time,
+  with worst-case hot shapes in the low single-digit percent (see
+  [Benchmark methodology](#benchmark-methodology)).
 
 ## Try it with Docker
 
