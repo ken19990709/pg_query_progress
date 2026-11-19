@@ -29,8 +29,13 @@ MERGEQ="MERGE /* s34m */ INTO s34_t t USING (SELECT g AS k, g AS v, repeat('v', 
 EX=$(q "EXPLAIN (COSTS OFF) $MERGEQ")
 echo "$EX" | grep -q "Merge on"
 check "plan top node is Merge on" $?
-NODES=$(echo "$EX" | grep -cE 'Merge on|->')
-echo "  info: explain nodes=$NODES"
+# EXPLAIN prints bitmap index scan / bitmap and / bitmap or subtrees line
+# by line, but the progress walk folds them into their parent (no
+# instrument, not counted in nodes_total) -- exclude those lines from
+# the comparison base so the assertion below stays valid if the planner
+# ever picks a bitmap join path instead of today's hash join
+NODES=$(echo "$EX" | grep -E 'Merge on|->' | grep -vcE 'Bitmap (Index Scan|And|Or)')
+echo "  info: explain nodes=$NODES (bitmap subtree lines excluded)"
 
 bg_open 9 s34fifo "$WORKDIR/s34.log"
 sendq 9 "SET max_parallel_workers_per_gather=0"
