@@ -242,11 +242,16 @@ What that means per form:
   (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) are tracked.  Not tracked: DDL
   and utility statements (they do not run through the executor hooks),
   `COPY FROM` (it writes the table directly, bypassing the executor),
-  and DML nested inside SQL function or PL/pgSQL bodies (only top-level
-  statements are tracked).  The inner query of `CREATE TABLE AS SELECT`,
-  of materialized views and of `COPY (SELECT ...) TO` is tracked as the
-  `SELECT` it is; the diff-application statements inside
-  `REFRESH MATERIALIZED VIEW CONCURRENTLY` are tracked individually.
+  and DML nested inside SQL or PL/pgSQL function bodies invoked by a
+  running query (functions, triggers) -- the nesting guard sees the
+  outer statement only.  Tracked beyond the top level, same as it
+  always was for inner `SELECT`s: statements executing in executor
+  contexts entered directly from utility statements each get their own
+  slot row -- the inner query of `CREATE TABLE AS SELECT`, of
+  materialized views and of `COPY (SELECT ...) TO` (tracked as the
+  `SELECT` it is), the DML inside a `DO` block, and the
+  diff-application statements inside
+  `REFRESH MATERIALIZED VIEW CONCURRENTLY`.
 - DML readouts in the view: without `RETURNING`, `plan_rows` and
   `rows_returned` are both 0 -- the planner prices the `ModifyTable`
   output at zero rows unless `RETURNING` is present, and the root node
@@ -312,8 +317,9 @@ What that means per form:
 See [tests/README.md](tests/README.md).  The suite bootstraps throwaway
 instances and covers the bar gate, cancellation/error paths, cursors,
 SRFs, parallel visibility, the shared-memory layout, co-existence with
-other preloaded extensions (pg_stat_statements), DML progress across all
-statement forms (values inserts, parallel insert-select, `ON CONFLICT`,
+other preloaded extensions (pg_stat_statements), DML progress across
+all statement forms (values inserts, insert-select over a table scan --
+including the pinned fact that DML sources stay serial, `ON CONFLICT`,
 update/delete forms, `MERGE`, partition routing and triggers, stress
 paths), and (per branch) the GUC off arm and the worker instrumentation
 pairing.  There is no hosted CI yet; `tools/audit_leak_check.sh` and a
