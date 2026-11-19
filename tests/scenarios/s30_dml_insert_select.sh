@@ -23,13 +23,24 @@ q "DROP TABLE IF EXISTS s30_t" > /dev/null
 q "CREATE TABLE s30_t (x int, y int)" > /dev/null
 TOTAL=$(q "SELECT count(*) FROM big_table")
 
+# Row multiplier for the source: cross the table scan with a small
+# generate_series so the insert runs long enough for several publish
+# cycles on BOTH -O0 debug and -O2 release kernels (a plain scan of the
+# scale-0.1 table completes within about a second on -O2 and the
+# >=5-distinct sampling-density assertion starves).  The cross join
+# cannot grow a Gather: the statement is a top-level INSERT (see the
+# parallelModeOK pin below).  All assertions are row-count based, so a
+# slower kernel only stretches the scenario, never changes its outcome.
+MULT="${PGQP_S30_MULT:-5}"
+EXPECT=$(( TOTAL * MULT ))
+
 FORCEPAR="SET max_parallel_workers_per_gather=2; SET min_parallel_table_scan_size=0; SET parallel_setup_cost=1; SET parallel_tuple_cost=0.0000001"
 
-EX=$(q "$FORCEPAR; EXPLAIN (COSTS OFF) INSERT /* s30ins */ INTO s30_t SELECT x, y FROM big_table")
+EX=$(q "$FORCEPAR; EXPLAIN (COSTS OFF) INSERT /* s30ins */ INTO s30_t SELECT b.x, b.y FROM big_table b, generate_series(1, $MULT) g")
 echo "$EX" | grep -q "Insert on"
 check "plan top node is Insert on" $?
 echo "$EX" | grep -q "Seq Scan on big_table"
-check "source plan is a table scan" $?
+check "source plan scans big_table (x$MULT row multiplier)" $?
 if echo "$EX" | grep -q "Gather"; then
   check "source plan has no Gather (parallel DML sources unplannable today)" 1 "$EX"
 else
@@ -39,7 +50,7 @@ fi
 LOG="$WORKDIR/s30.log"
 bg_open 9 s30fifo "$LOG"
 sendq 9 "$FORCEPAR"
-sendq 9 "INSERT /* s30ins */ INTO s30_t SELECT x, y FROM big_table"
+sendq 9 "INSERT /* s30ins */ INTO s30_t SELECT b.x, b.y FROM big_table b, generate_series(1, $MULT) g"
 
 PID=""
 wait_until "$(timeout_scale 15)" "q \"SELECT 1 FROM pg_query_progress WHERE state='running' AND query LIKE '%s30ins%' AND pid <> pg_backend_pid()\" | grep -q 1" && \
@@ -68,6 +79,6 @@ check "terminal completed/1.0" $? "row=$TR"
 [ "$PAR" = "f" ]; check "parallel = f (serial DML source, as planned)" $? "parallel=$PAR"
 
 INS=$(q "SELECT count(*) FROM s30_t")
-[ "$INS" = "$TOTAL" ]; check "all source rows inserted" $? "inserted=$INS source=$TOTAL"
+[ "$INS" = "$EXPECT" ]; check "all source rows inserted" $? "inserted=$INS source=$EXPECT"
 
 finish_scenario

@@ -51,6 +51,17 @@ Knobs (environment):
 - `PGQP_TOLERANCE` -- timeout multiplier for slow machines (default 1)
 - `PGQP_AUTO_EXPLAIN_SO` -- path to auto_explain.so (s07 skips if absent)
 - `PGQP_INCLUDE` -- server include dir for the s18 layout probe
+- `PGQP_S14_REPEATS` -- override s14's UNION ALL repetition (default:
+  calibrated at runtime to a ~10s arm via one timed probe, so the frame
+  spacing assertions hold on -O0 debug and -O2 release kernels alike)
+- `PGQP_S30_MULT` -- s30 source row multiplier (default x5)
+
+The timing-density scenarios (s14, s30, s35) size their workloads
+so that frame/poll sampling-density assertions pass against both -O0
+debug builds and 2-4x faster -O2 release builds of the same kernel;
+sizes only stretch the scenarios, never change what they assert.
+(s26, which also self-calibrates this way, exists on the main branch
+only.)
 
 Teardown is `tests/bootstrap.sh --down` -- it works when called bare
 (no environment needs to be sourced) and removes the workdir only after
