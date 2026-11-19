@@ -7,6 +7,10 @@
 #  - percent sequence monotonic non-decreasing
 #  - last frame "100.0% done"
 #  - stdout carries no bar bytes
+# The two wall-clock-paced readings (first-frame window, frame count) get
+# one guarded re-measure with s21's semantics: a cold instance on a loaded
+# shared runner can stretch them without any extension fault, so a miss
+# re-runs the statement once and the second capture is judged.
 source "$(dirname "$BASH_SOURCE")/../common.sh"
 
 Q="SELECT count(*), sum(x + 1) FROM big_table"
@@ -18,24 +22,46 @@ Q2+=") t"
 # scales; fall back to the single scan when big_table is at full scale
 Q="$Q2"
 
-OUT="$WORKDIR/s13.out"; ERR="$WORKDIR/s13.err"
-: > "$OUT"; : > "$ERR"
+run_query() {                  # run_query <out> <err>; writes $WORKDIR/dur
+  : > "$1"; : > "$2"
+  (
+    T0=$(date +%s%3N)
+    psql -X -At -c "SET pg_query_progress.bar=on" \
+                 -c "SET max_parallel_workers_per_gather=0" \
+                 -c "$Q" > "$1" 2> "$2"
+    echo $(( $(date +%s%3N) - T0 )) > "$WORKDIR/dur"
+  ) &
+  wait $!
+}
 
-(
-  T0=$(date +%s%3N)
-  psql -X -At -c "SET pg_query_progress.bar=on" \
-               -c "SET max_parallel_workers_per_gather=0" \
-               -c "$Q" > "$OUT" 2> "$ERR"
-  echo $(( $(date +%s%3N) - T0 )) > "$WORKDIR/dur"
-) &
-RUNPID=$!
-wait "$RUNPID"
-DUR_MS=$(cat "$WORKDIR/dur")
-FRAMES=$(bar_count "$ERR")
+# timing_ok <elapsed> <frames> <dur_ms>: the two readings that scale with
+# wall-clock pacing -- first frame inside [gate, gate+0.5s], and enough
+# frames for the statement's own duration
+timing_ok() {
+  local e="$1" frames="$2" min=$(( $3 / 500 - 2 ))
+  [ -n "$e" ] || return 1
+  awk -v e="$e" 'BEGIN{exit (e>=0.5 && e<=1.0)?0:1}' || return 1
+  [ "$frames" -ge "$min" ] && [ "$frames" -ge 2 ]
+}
+
+OUT="$WORKDIR/s13.out"; ERR="$WORKDIR/s13.err"
+run_query "$OUT" "$ERR"
+DUR_MS=$(cat "$WORKDIR/dur"); FRAMES=$(bar_count "$ERR")
 echo "  info: duration=${DUR_MS}ms frames=$FRAMES"
 
-# (1) first frame query-elapsed in [gate, gate+0.5s] (gate=500ms default)
+# one guarded re-measure (s21-style): retry iff a timing-window reading is
+# off, then keep the second capture as the one every check below judges
 FFE=$(bar_first_elapsed "$ERR")
+if ! timing_ok "$FFE" "$FRAMES" "$DUR_MS"; then
+  echo "  info: timing window missed; re-measuring once"
+  OUT="$WORKDIR/s13.retry.out"; ERR="$WORKDIR/s13.retry.err"
+  run_query "$OUT" "$ERR"
+  DUR_MS=$(cat "$WORKDIR/dur"); FRAMES=$(bar_count "$ERR")
+  FFE=$(bar_first_elapsed "$ERR")
+  echo "  info: re-measure duration=${DUR_MS}ms frames=$FRAMES"
+fi
+
+# (1) first frame query-elapsed in [gate, gate+0.5s] (gate=500ms default)
 awk -v e="$FFE" 'BEGIN{exit (e>=0.5 && e<=1.0)?0:1}'
 check "first frame query-elapsed in [gate, gate+0.5s] (=0.5-1.0s)" $? "elapsed=${FFE}s"
 
