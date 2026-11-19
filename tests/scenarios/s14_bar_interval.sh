@@ -4,9 +4,29 @@
 # are captured by polling the growing stderr file (10ms resolution).
 source "$(dirname "$BASH_SOURCE")/../common.sh"
 
-# the query must run well past 2 x the slow arm's interval so that arm
-# accumulates several interval-gated frames
-REPEATS="${PGQP_S14_REPEATS:-$(awk -v s="${PGQP_SCALE:-0.1}" 'BEGIN{r=130/(10*s); printf "%d", (r<12)?12:int(r+0.5)}')}"
+# The query must run well past 2 x the slow arm's interval so that arm
+# accumulates several interval-gated frames.  The repeat count is
+# calibrated at runtime: one timed 10-branch probe sizes the UNION ALL
+# repetition to a ~10s arm on WHATEVER kernel is underneath -- a fixed
+# count tuned on a -O0 debug build deterministically undershoots on an
+# -O2 release build (2-4x faster) and only first+terminal frames appear.
+# More repeats only make the scenario slower, never differently-passing:
+# every assertion is frame-count / gap / monotonicity based, not wall
+# clock.  Explicit override: PGQP_S14_REPEATS.
+if [ -n "${PGQP_S14_REPEATS:-}" ]; then
+  REPEATS="$PGQP_S14_REPEATS"
+else
+  PROBE=""
+  for i in $(seq 1 10); do PROBE+="SELECT count(*), sum(x + 1) AS c FROM big_table"; [ "$i" = 10 ] || PROBE+=" UNION ALL "; done
+  T0=$(date +%s%3N)
+  psql -X -qAt -c "SET max_parallel_workers_per_gather=0" -c "SELECT sum(c) FROM ($PROBE) t" > /dev/null 2>&1
+  T10=$(( $(date +%s%3N) - T0 ))
+  [ "$T10" -lt 100 ] && T10=100
+  REPEATS=$(( 10 * (10000 + T10 - 1) / T10 ))
+  [ "$REPEATS" -lt 12 ] && REPEATS=12
+  [ "$REPEATS" -gt 1200 ] && REPEATS=1200
+fi
+echo "  info: repeats=$REPEATS (calibration probe: 10 branches in ${T10:-n/a}ms)"
 ARMS=""
 
 for i in $(seq 1 "$REPEATS"); do ARMS+="SELECT count(*), sum(x + 1) AS c FROM big_table"; [ "$i" = "$REPEATS" ] || ARMS+=" UNION ALL "; done
