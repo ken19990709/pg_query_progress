@@ -42,8 +42,14 @@ with open(path, "w") as f:
 PYEOF
 }
 
-run_insert() {                 # run_insert <rows> -> sets DUR_MS/FRAMES/TERM_ROW
+run_insert() {                 # run_insert <rows> -> sets DUR_MS/FRAMES/TERM_ROW/RUN_ROWS
   local n="$1"
+  RUN_ROWS="$n"
+  # the adaptive retry re-inserts from scratch: truncate so the row
+  # count and tuples assertions below always refer to THIS run (a
+  # leftover first attempt would otherwise fail them loudly but
+  # spuriously)
+  q "TRUNCATE s29_t" > /dev/null
   write_sql "$n" "$WORKDIR/s29.sql"
   : > "$WORKDIR/s29.out"; : > "$WORKDIR/s29.err"; : > "$WORKDIR/s29.poll"
   TERM_ROW=""
@@ -85,11 +91,11 @@ check "terminal row completed/1.0" $? "row=$V"
 TUPLES=$(echo "$V" | cut -d'|' -f3)
 NT=$(echo "$V" | cut -d'|' -f4)
 ND=$(echo "$V" | cut -d'|' -f5)
-[ "$TUPLES" -ge "$N" ]; check "tuples_processed >= literal rows (exact denominator)" $? "tuples=$TUPLES rows=$N"
+[ "$TUPLES" -ge "$RUN_ROWS" ]; check "tuples_processed >= literal rows (exact denominator)" $? "tuples=$TUPLES rows=$RUN_ROWS"
 [ "$NT" -ge 2 ]; check "nodes_total counts the plan (ModifyTable included)" $? "nodes_total=$NT explain=$NODES"
 [ "$ND" -ge 1 ]; check "ModifyTable counted as done (nodes_done >= 1)" $? "nodes_done=$ND"
 INS=$(q "SELECT count(*) FROM s29_t")
-[ "$INS" = "$N" ]; check "all rows inserted" $? "inserted=$INS expected=$N"
+[ "$INS" = "$RUN_ROWS" ]; check "all rows inserted" $? "inserted=$INS expected=$RUN_ROWS"
 
 # (2) frame assertions (apply once the run cleared the gate)
 if [ "$FRAMES" -ge 2 ]; then
