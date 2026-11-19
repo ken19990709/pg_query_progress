@@ -27,6 +27,14 @@
 
 set -u
 
+# The env file written at the end of a bootstrap (and sourced back by
+# --down) references LD_LIBRARY_PATH unguarded.  Source-tree runs set it
+# below (the shim makes itself the library search path), but against an
+# installed tree (PGDG packages, staged installs) nothing ever does --
+# so pin it to empty up front, where every path passes, instead of
+# dying in the heredoc after the instance is already up.
+LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRCROOT="$(cd "$TESTS_DIR/.." && pwd)"
 ENV_FILE="$TESTS_DIR/.pgqp_env.sh"
