@@ -1,7 +1,8 @@
 /*-------------------------------------------------------------------------
  *
  * pg_query_progress.c
- *		Live, per-query progress tracking for SELECT statements.
+ *		Live, per-query progress tracking for SELECT and DML
+ *		(INSERT/UPDATE/DELETE/MERGE) statements.
  *
  * Mechanism: wrap every PlanState's ExecProcNode with a
  * cheap tick function that keeps core-equivalent row instrumentation
@@ -333,26 +334,26 @@ _PG_init(void)
 	 * analogous to client_min_messages -> PGC_USERSET; the tracking data
 	 * plane keeps v1's pg_query_progress.track (PGC_SUSET). */
 	DefineCustomBoolVariable("pg_query_progress.bar",
-							 "Render an in-session progress bar for tracked SELECTs via NOTICE frames.",
-							 "Off by default; frames go to the client's NOTICE stream (psql: stderr).",
-							 &pgqp_bar,
-							 false,
-							 PGC_USERSET,
-							 0,
-							 NULL,
-							 NULL,
-							 NULL);
+								 "Render an in-session progress bar for tracked SELECTs via NOTICE frames.",
+								 "Off by default; frames go to the client's NOTICE stream (psql: stderr).",
+								 &pgqp_bar,
+								 false,
+								 PGC_USERSET,
+								 0,
+								 NULL,
+								 NULL,
+								 NULL);
 
 	DefineCustomBoolVariable("pg_query_progress.bar_ansi",
-							 "Use ANSI single-line redraw escape codes in bar frames.",
-							 "Only for real terminals; pipes/redirects will retain raw escape bytes.",
-							 &pgqp_bar_ansi,
-							 false,
-							 PGC_USERSET,
-							 0,
-							 NULL,
-							 NULL,
-							 NULL);
+								 "Use ANSI single-line redraw escape codes in bar frames.",
+								 "Only for real terminals; pipes/redirects will retain raw escape bytes.",
+								 &pgqp_bar_ansi,
+								 false,
+								 PGC_USERSET,
+								 0,
+								 NULL,
+								 NULL,
+								 NULL);
 
 	DefineCustomIntVariable("pg_query_progress.bar_interval_ms",
 							"Minimum interval between bar frames in milliseconds.",
@@ -572,9 +573,17 @@ pgqp_shmem_startup(void)
  * Decide whether this ExecutorStart should be tracked.  Conditions per
  * Decide whether this ExecutorStart should be tracked: regular backend,
  * top-level (nesting_level == 0, the
- * Run-hook guard excludes SQL-function and PLpgSQL re-entries), CMD_SELECT
- * only, skip EXPLAIN (no ANALYZE) / GENERIC plan modes, skip auxiliary
- * processes whose ProcNumber may exceed nslots.
+ * Run-hook guard excludes SQL-function and PLpgSQL re-entries), one of the
+ * five executor command tags, skip EXPLAIN (no ANALYZE) / GENERIC plan
+ * modes, skip auxiliary processes whose ProcNumber may exceed nslots.
+ *
+ * v5: the command filter is a constructive whitelist of the five
+ * CmdType values that ever run through the executor's four hooks as a
+ * top-level query: SELECT plus the DML family.  CMD_UTILITY (DDL et al.,
+ * dispatched via ProcessUtility, never reaching these hooks as a
+ * statement of its own), CMD_NOTHING (rule-rewrite and MERGE action
+ * dummy) and CMD_UNKNOWN are excluded by construction, not by listing
+ * them.
  *
  * v3: parallel workers are handled by the separate pgqp_worker_register
  * path before this function is reached (pgqp_ExecutorStart branches on
@@ -592,8 +601,17 @@ pgqp_should_track(QueryDesc *queryDesc, int eflags)
 		return false;
 	if (nesting_level != 0)
 		return false;
-	if (queryDesc->operation != CMD_SELECT)
-		return false;
+	switch (queryDesc->operation)
+	{
+		case CMD_SELECT:
+		case CMD_INSERT:
+		case CMD_UPDATE:
+		case CMD_DELETE:
+		case CMD_MERGE:
+			break;
+		default:				/* CMD_UTILITY / CMD_NOTHING / CMD_UNKNOWN */
+			return false;
+	}
 	if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | PGQP_EXPLAIN_GENERIC_FLAG))
 		return false;
 	if (queryDesc->estate == NULL || queryDesc->planstate == NULL)
@@ -1317,6 +1335,17 @@ pgqp_worker_register(QueryDesc *queryDesc, int eflags)
 
 	if (!pgqp_track || pgqp == NULL || pgqp_wtab == NULL || pgqp_slots == NULL)
 		return;
+	/*
+	 * CMD_SELECT here is exact, not a leftover of the pre-v5 leader-side
+	 * filter: a worker's QueryDesc is rebuilt from the dummy PlannedStmt
+	 * that ExecSerializePlan constructs, whose commandType is hardcoded
+	 * to CMD_SELECT (execParallel.c) on every supported major -- the
+	 * workers of a DML parallel source pass this filter unchanged, which
+	 * is why the v5 DML widening above has no worker-side counterpart.
+	 * Should upstream ever serialize the real command type through, this
+	 * filter must be widened in step or those workers silently stop
+	 * reporting (a mere undercount, never a crash).
+	 */
 	if (queryDesc->operation != CMD_SELECT)
 		return;
 	if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | PGQP_EXPLAIN_GENERIC_FLAG))
@@ -1708,6 +1737,36 @@ pgqp_walk_node(PlanState *ps, PgQPAccum *acc, PgQPWalk *ctx)
 				acc->nodes_done += sub.nodes_done + ((frac >= 0.999) ? 1 : 0);
 
 
+				return ps->plan->total_cost;
+			}
+
+		case T_ModifyTable:
+			{
+				/*
+				 * v5: zero-weight passthrough.  create_modifytable_path
+				 * prices the node at exactly its source subtree
+				 * (total_cost = subpath->total_cost; the planner charges
+				 * nothing for the modification work itself), so the
+				 * node's self_cost is identically zero and it enters
+				 * neither numerator nor denominator: global progress is
+				 * driven by the source plan alone, which is precisely
+				 * input-driven semantics.  The source subtree (this
+				 * node's lefttree, plus any initPlan/subPlan children)
+				 * is walked normally -- including a Gather inside it,
+				 * whose worker counters merge exactly as under a SELECT
+				 * top node (ModifyTable never sits below a Gather, so
+				 * the parallel region is always closed by the time the
+				 * walk reaches this node).
+				 *
+				 * Node accounting: the root's emitted rows (RETURNING
+				 * rows; zero without RETURNING) still feed the
+				 * tuples_processed sum, and the zero-weight node is
+				 * counted as done -- it carries no work item of its own.
+				 */
+				pgqp_walk_children(ps, acc, acc, ctx);
+				acc->tuples += pgqp_node_rows(ps);
+				acc->nodes_total++;
+				acc->nodes_done++;
 				return ps->plan->total_cost;
 			}
 
