@@ -33,9 +33,11 @@ check "plan top node is Merge on" $?
 # by line, but the progress walk folds them into their parent (no
 # instrument, not counted in nodes_total) -- exclude those lines from
 # the comparison base so the assertion below stays valid if the planner
-# ever picks a bitmap join path instead of today's hash join
-NODES=$(echo "$EX" | grep -E 'Merge on|->' | grep -vcE 'Bitmap (Index Scan|And|Or)')
-echo "  info: explain nodes=$NODES (bitmap subtree lines excluded)"
+# ever picks a bitmap join path instead of today's hash join.  Non-root
+# Materialize is folded the same way (child-driven frac, itself absent
+# from nodes_total), so its EXPLAIN line is excluded too (review R-1).
+NODES=$(echo "$EX" | grep -E 'Merge on|->' | grep -vcE 'Bitmap (Index Scan|And|Or)|Materialize')
+echo "  info: explain nodes=$NODES (bitmap subtree + non-root Materialize lines excluded)"
 
 bg_open 9 s34fifo "$WORKDIR/s34.log"
 sendq 9 "SET max_parallel_workers_per_gather=0"
