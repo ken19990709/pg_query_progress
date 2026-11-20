@@ -1,0 +1,99 @@
+# Release on PGXN - draft workflow for ken19990709/pg_query_progress.
+#
+# Install: copy to .github/workflows/release-pgxn.yml, then add repository
+# secrets PGXN_USERNAME / PGXN_PASSWORD (Settings -> Secrets and variables ->
+# Actions). Manual runs default to dry-run (bundle and print, no upload);
+# pushing a clean v* tag publishes for real.
+#
+# Design notes:
+# - Uses the NEW official actions (announced 2026-11-16 on blog.pgxn.org),
+#   which replace the old Linux/amd64-only docker pgxn-tools container:
+#     pgxn/postgres-action  https://github.com/pgxn/postgres-action
+#     pgxn/release-action   https://github.com/pgxn/release-action
+# - Triggers on any tag starting with "v", but jobs are guarded with
+#   !contains(github.ref_name, '-') so versioned-per-PG tags such as
+#   v4.0.0-pg15 (already present in this repo) can never publish a bogus
+#   PGXN release. PGXN rejects a duplicate/incorrect version after the fact.
+# - Build gate: compile + install on PG 15-18 (the supported range) before
+#   anything is uploaded. postgres-action runs with start:false, so no
+#   cluster is started; the module's shared_preload_libraries requirement is
+#   irrelevant for a build-only check. Full behavioral testing stays in the
+#   existing ci.yml smoke suite.
+# - pgxn/release-action bundles via `git archive`, which honors the repo's
+#   .gitattributes export-ignore rules (tests/, CI, docker and dev-only
+#   files stay out of the zip). Output `archive` = zip filename, reused
+#   for the GitHub release attachment.
+# - Manual rehearsal: "Run workflow" (workflow_dispatch) defaults to
+#   dry-run=true - it bundles and prints the release command without
+#   uploading. Flip it off (or push a clean v* tag) to publish for real.
+
+name: Release on PGXN
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Rehearse only (bundle and print, do not upload)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # needed to attach the zip to a GitHub release
+
+jobs:
+  build:
+    name: Build gate on PostgreSQL ${{ matrix.pg }}
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['15', '16', '17', '18']
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+
+      - name: Install PostgreSQL ${{ matrix.pg }} (no cluster)
+        uses: pgxn/postgres-action@v0
+        with:
+          version: ${{ matrix.pg }}
+          start: false
+
+      - name: Build
+        run: make
+
+      - name: Install
+        run: sudo make install
+
+  release:
+    name: Release on PGXN
+    needs: build
+    # Skips (not fails) until PGXN_USERNAME/PGXN_PASSWORD secrets are
+    # configured, so this workflow can ship to the repo before the
+    # maintainer's PGXN account is approved.
+    if: ${{ !contains(github.ref_name, '-') && secrets.PGXN_USERNAME != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v7
+
+      - name: Release on PGXN
+        id: pgxn
+        uses: pgxn/release-action@v0
+        with:
+          username: ${{ secrets.PGXN_USERNAME }}
+          password: ${{ secrets.PGXN_PASSWORD }}
+          # Push of a clean v* tag => real release; manual runs follow the
+          # dry-run input (default true).
+          dry-run: ${{ github.event_name != 'push' && inputs.dry-run }}
+
+      - name: Attach zip to the GitHub release
+        if: >-
+          ${{ github.event_name == 'push' &&
+              startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          files: ${{ steps.pgxn.outputs.archive }}

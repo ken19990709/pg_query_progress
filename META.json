@@ -1,0 +1,56 @@
+{
+   "name": "pg_query_progress",
+   "abstract": "Live per-query progress tracking for SELECT and DML statements",
+   "description": "pg_query_progress wraps the PostgreSQL executor's per-node tuple loop with a cheap counting hook, converts per-node row counts into a cost-weighted progress fraction using the planner's own cost model, and publishes the result to shared memory. The progress of any running SELECT, INSERT, UPDATE, DELETE or MERGE can be read from any session through the pg_query_progress view, or rendered as a live progress bar directly into the running session's NOTICE stream. Requires shared_preload_libraries. Works on PostgreSQL 15-18.",
+   "version": "1.0.0",
+   "maintainer": [
+      "zengxx <49590747+ken19990709@users.noreply.github.com>"
+   ],
+   "license": "postgresql",
+   "release_status": "stable",
+   "provides": {
+      "pg_query_progress": {
+         "abstract": "Live per-query progress tracking for SELECT and DML statements",
+         "file": "pg_query_progress--1.0.sql",
+         "docfile": "README.md",
+         "version": "1.0.0"
+      }
+   },
+   "no_index": {
+      "directory": [
+         "tools",
+         "scripts",
+         "docker"
+      ]
+   },
+   "prereqs": {
+      "runtime": {
+         "requires": {
+            "PostgreSQL": "15.0.0"
+         }
+      }
+   },
+   "resources": {
+      "homepage": "https://github.com/ken19990709/pg_query_progress",
+      "bugtracker": {
+         "web": "https://github.com/ken19990709/pg_query_progress/issues"
+      },
+      "repository": {
+         "url": "git://github.com/ken19990709/pg_query_progress.git",
+         "web": "https://github.com/ken19990709/pg_query_progress",
+         "type": "git"
+      }
+   },
+   "generated_by": "pg_query_progress maintainers",
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   },
+   "tags": [
+      "progress",
+      "monitoring",
+      "performance",
+      "instrumentation",
+      "utilities"
+   ]
+}
