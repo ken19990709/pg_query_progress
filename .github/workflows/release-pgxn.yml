@@ -70,17 +70,34 @@ jobs:
   release:
     name: Release on PGXN
     needs: build
-    # Skips (not fails) until PGXN_USERNAME/PGXN_PASSWORD secrets are
-    # configured, so this workflow can ship to the repo before the
-    # maintainer's PGXN account is approved.
-    if: ${{ !contains(github.ref_name, '-') && secrets.PGXN_USERNAME != '' }}
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
+
+      # Guards at step level: the secrets context is not allowed in a
+      # job-level if, and referencing it there makes the whole workflow
+      # file invalid (instant parse failure). Until PGXN_USERNAME /
+      # PGXN_PASSWORD are configured (maintainer PGXN account approval
+      # pending), the upload steps are skipped with a notice instead of
+      # failing the run.
+      - name: Check PGXN credentials
+        id: creds
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          if [ -n "$PGXN_USERNAME" ] && [ -n "$PGXN_PASSWORD" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::PGXN secrets not configured - skipping the upload until the maintainer account is approved and secrets are set."
+          fi
 
       - name: Release on PGXN
         id: pgxn
+        if: steps.creds.outputs.ready == 'true'
         uses: pgxn/release-action@v0
         with:
           username: ${{ secrets.PGXN_USERNAME }}
@@ -91,7 +108,8 @@ jobs:
 
       - name: Attach zip to the GitHub release
         if: >-
-          ${{ github.event_name == 'push' &&
+          ${{ steps.creds.outputs.ready == 'true' &&
+              github.event_name == 'push' &&
               startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v2
         with:
